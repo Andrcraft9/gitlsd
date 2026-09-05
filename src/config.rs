@@ -155,6 +155,7 @@ impl Default for Config {
                 "log".into(),
                 "--oneline".into(),
                 "--decorate".into(),
+                "--color=always".into(),
             ],
             batch_size: 100,
             bindings,
