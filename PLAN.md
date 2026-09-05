@@ -6,5 +6,6 @@
 
 ## Planned
 
+- [ ] Preview split view
 - [ ] Show mode
-- [ ] Diff mode
+- [ ] Diff/status mode (staged/unstaged changes)
