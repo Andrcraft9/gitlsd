@@ -88,10 +88,10 @@ fn search_repeats_forward_and_backward_with_wraparound() {
 fn help_reflects_effective_configuration_and_quit_is_clean() {
     let help = stdout(run(
         ":;h;e;l;p;enter",
-        "set log log --all\nset batch-size 3\nbind x move-down\n",
+        "set log git log --oneline --all\nset batch-size 3\nbind x move-down\n",
     ));
     assert!(help.contains("screen=help\n"));
-    assert!(help.contains("setting.log=\"log\" \"--all\"\n"));
+    assert!(help.contains("setting.log=\"git\" \"log\" \"--oneline\" \"--all\"\n"));
     assert!(help.contains("setting.batch-size=3\n"));
     assert!(help.contains("binding.x=move-down\n"));
 
@@ -110,13 +110,97 @@ fn custom_bindings_dispatch_for_literal_and_named_separator_keys() {
 }
 
 #[test]
-fn configured_git_argv_filters_history_despite_output_expanding_flags() {
+fn configured_git_argv_preserves_format_and_filters_history() {
     let output = stdout(run(
         "",
-        "set log log --fixed-strings --grep 'Correctly validate' --graph --patch --stat --name-only\n",
+        "set log git log --format='CUSTOM %s' --fixed-strings --grep 'Correctly validate'\n",
     ));
     assert!(output.contains("commit=f2138f311d2a3a64a4121756ffda9cbef84c527b\n"));
-    assert!(output.contains("subject=Correctly validate light transition properties\n"));
+    assert!(output.contains("display=CUSTOM Correctly validate light transition properties\n"));
+}
+
+#[test]
+fn rows_match_git_with_pagination_and_pathspec() {
+    for options in [
+        vec!["--oneline", "--decorate"],
+        vec!["--format=LABEL %h %s", "--", "package.json"],
+    ] {
+        let config = format!(
+            "set batch-size 2\nset log git log {}\n",
+            options
+                .iter()
+                .map(|arg| format!("'{arg}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let output = stdout(run("down;down", &config));
+        let mut expected = Vec::new();
+        for skip in [0, 2] {
+            let mut args = options.clone();
+            let skip = format!("--skip={skip}");
+            let insertion = args
+                .iter()
+                .position(|arg| *arg == "--")
+                .unwrap_or(args.len());
+            args.splice(insertion..insertion, [&skip, "--max-count=2"]);
+            let git = Command::new("git")
+                .arg("--no-pager")
+                .arg("log")
+                .args(args)
+                .current_dir(fixture())
+                .output()
+                .unwrap();
+            assert!(git.status.success());
+            expected.extend(
+                String::from_utf8(git.stdout)
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned),
+            );
+        }
+        let actual: Vec<_> = output
+            .split("rows:\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .map(|line| line[2..].split_once(' ').unwrap().1.to_owned())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn custom_display_search_and_color_are_plain_in_debug() {
+    let config = "set batch-size 2\nset log git log --color=always --format='%C(red)ONLYDISPLAY%C(reset) %s'\n";
+    let output = stdout(run("/;O;N;L;Y;D;I;S;P;L;A;Y;enter;n;N", config));
+    assert!(output.contains("selected=1\n"));
+    assert!(output.contains("display=ONLYDISPLAY GL JS v3.30.0\n"));
+    assert!(!output.contains('\x1b'));
+}
+
+#[test]
+fn incompatible_configuration_has_location_and_actionable_error() {
+    for command in [
+        "log --oneline",
+        "git status",
+        "git log",
+        "git log --oneline --graph",
+        "git log --oneline --stat",
+        "git log --oneline -p",
+        "git log --oneline --notes",
+        "git log --oneline --show-signature",
+        "git log --format=%B",
+        "git log --format=%h%n%s",
+    ] {
+        let output = run("", &format!("set log {command}\n"));
+        assert!(!output.status.success(), "{command}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(".conf:1:"), "{error}");
+        assert!(
+            error.contains("one-line") || error.contains("required form"),
+            "{error}"
+        );
+    }
 }
 
 #[test]

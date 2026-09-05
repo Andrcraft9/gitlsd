@@ -2,15 +2,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RECORD_FORMAT: &str = "%H%x00%h%x00%an%x00%cs%x00%s";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitRecord {
     pub id: String,
-    pub short_id: String,
-    pub author: String,
-    pub date: String,
-    pub subject: String,
+    /// Git-produced text with only printable characters and safe SGR sequences.
+    pub display: String,
 }
 
 pub trait HistorySource {
@@ -30,41 +26,8 @@ impl GitHistory {
             command,
         }
     }
-}
 
-impl HistorySource for GitHistory {
-    fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
-        let format_argument = format!("--format={RECORD_FORMAT}");
-        let skip_argument = format!("--skip={offset}");
-        let count_argument = format!("--max-count={limit}");
-        let mut arguments = self.command.clone();
-        let mut before_pathspecs = true;
-        arguments.retain(|argument| {
-            if argument == "--" {
-                before_pathspecs = false;
-                true
-            } else {
-                !before_pathspecs || !expands_output(argument)
-            }
-        });
-        let insertion = arguments
-            .iter()
-            .position(|argument| argument == "--")
-            .unwrap_or(arguments.len());
-        arguments.splice(
-            insertion..insertion,
-            [
-                "--no-color".to_owned(),
-                "--no-decorate".to_owned(),
-                "--no-patch".to_owned(),
-                "--no-show-signature".to_owned(),
-                "--no-notes".to_owned(),
-                format_argument,
-                "-z".to_owned(),
-                skip_argument,
-                count_argument,
-            ],
-        );
+    fn run(&self, arguments: &[String]) -> Result<Vec<u8>, GitError> {
         let output = Command::new("git")
             .arg("--no-pager")
             .args(arguments)
@@ -76,51 +39,110 @@ impl HistorySource for GitHistory {
                 directory: self.directory.clone(),
                 reason: error.to_string(),
             })?;
-
         if !output.status.success() {
-            let stderr = sanitize_text(&String::from_utf8_lossy(&output.stderr))
-                .trim()
-                .to_owned();
             return Err(GitError::Process {
                 status: output.status.code(),
-                stderr,
+                stderr: safe_text(&String::from_utf8_lossy(&output.stderr), false)
+                    .trim()
+                    .to_owned(),
             });
         }
-
-        parse_records(&output.stdout)
+        Ok(output.stdout)
     }
 }
 
-fn expands_output(argument: &str) -> bool {
-    matches!(
-        argument,
-        "--graph"
-            | "-p"
-            | "-u"
-            | "--patch"
-            | "--raw"
-            | "--stat"
-            | "--numstat"
-            | "--shortstat"
-            | "--summary"
-            | "--name-only"
-            | "--name-status"
-            | "--patch-with-raw"
-            | "--patch-with-stat"
-            | "--full-diff"
-            | "--binary"
-            | "--check"
-            | "--show-signature"
-            | "--notes"
-            | "--log-size"
-            | "-c"
-            | "--cc"
-    ) || argument.starts_with("--stat=")
-        || argument.starts_with("--dirstat")
-        || argument.starts_with("--notes=")
-        || argument.starts_with("-p-")
-        || argument.starts_with("-p+")
-        || argument.starts_with("-pU")
+impl HistorySource for GitHistory {
+    fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
+        let mut arguments = self.command[1..].to_vec();
+        let insertion = arguments
+            .iter()
+            .position(|argument| argument == "--")
+            .unwrap_or(arguments.len());
+        arguments.splice(
+            insertion..insertion,
+            [format!("--skip={offset}"), format!("--max-count={limit}")],
+        );
+        let display = self.run(&arguments)?;
+        let insertion = arguments
+            .iter()
+            .position(|argument| argument == "--")
+            .unwrap_or(arguments.len());
+        // These presentation overrides apply only to the companion identity query.
+        arguments.splice(
+            insertion..insertion,
+            [
+                "--format=%H".into(),
+                "--no-color".into(),
+                "--no-decorate".into(),
+            ],
+        );
+        let ids = self.run(&arguments)?;
+        pair_records(&display, &ids)
+    }
+}
+
+fn output_lines(output: &[u8]) -> Vec<&[u8]> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    output
+        .strip_suffix(b"\n")
+        .unwrap_or(output)
+        .split(|byte| *byte == b'\n')
+        .collect()
+}
+
+fn pair_records(display: &[u8], ids: &[u8]) -> Result<Vec<CommitRecord>, GitError> {
+    let rows = output_lines(display);
+    let ids = output_lines(ids);
+    if rows.len() != ids.len()
+        || ids
+            .iter()
+            .any(|id| !matches!(id.len(), 40 | 64) || !id.iter().all(u8::is_ascii_hexdigit))
+    {
+        return Err(GitError::Output("configured output does not contain exactly one line per commit; use `set log git log --oneline` or a one-line `--format`".into()));
+    }
+    Ok(rows
+        .into_iter()
+        .zip(ids)
+        .map(|(row, id)| CommitRecord {
+            id: String::from_utf8_lossy(id).into_owned(),
+            display: safe_text(&String::from_utf8_lossy(row), true),
+        })
+        .collect())
+}
+
+/// SGR has no cursor, clipboard, title, or other terminal side effects.
+pub fn safe_text(input: &str, retain_sgr: bool) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            let mut parameters = String::new();
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_ascii_digit() || *c == ';')
+            {
+                parameters.push(chars.next().unwrap());
+            }
+            if chars.peek() == Some(&'m') {
+                chars.next();
+                if retain_sgr {
+                    output.push_str(&format!("\x1b[{parameters}m"));
+                }
+            } else {
+                output.push('�');
+                output.push('[');
+                output.push_str(&parameters);
+            }
+        } else if character.is_control() {
+            output.push('�');
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 #[derive(Debug)]
@@ -152,48 +174,7 @@ impl fmt::Display for GitError {
         }
     }
 }
-
 impl std::error::Error for GitError {}
-
-fn parse_records(output: &[u8]) -> Result<Vec<CommitRecord>, GitError> {
-    let mut fields: Vec<_> = output.split(|byte| *byte == 0).collect();
-    if fields.last() == Some(&&[][..]) {
-        fields.pop();
-    }
-    if fields.len() % 5 != 0 {
-        return Err(GitError::Output(format!(
-            "output had {} fields, which is not a multiple of 5",
-            fields.len()
-        )));
-    }
-    Ok(fields
-        .chunks_exact(5)
-        .map(|fields| CommitRecord {
-            id: sanitize_bytes(fields[0]),
-            short_id: sanitize_bytes(fields[1]),
-            author: sanitize_bytes(fields[2]),
-            date: sanitize_bytes(fields[3]),
-            subject: sanitize_bytes(fields[4]),
-        })
-        .collect())
-}
-
-fn sanitize_bytes(input: &[u8]) -> String {
-    sanitize_text(&String::from_utf8_lossy(input))
-}
-
-fn sanitize_text(input: &str) -> String {
-    input
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '�'
-            } else {
-                character
-            }
-        })
-        .collect()
-}
 
 pub fn current_directory() -> Result<PathBuf, GitError> {
     std::env::current_dir().map_err(|error| GitError::Launch {
@@ -205,27 +186,19 @@ pub fn current_directory() -> Result<PathBuf, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn parses_delimited_git_records() {
-        let records =
-            parse_records(b"abcdef\0abcdef\0A U Thor\x002026-09-05\0A subject\0").unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].author, "A U Thor");
-        assert_eq!(records[0].subject, "A subject");
+    fn pairs_git_text_without_rebuilding_it() {
+        let id = "a".repeat(40);
+        let rows = pair_records(b"custom row\n", format!("{id}\n").as_bytes()).unwrap();
+        assert_eq!(rows[0].display, "custom row");
+        assert_eq!(rows[0].id, id);
+        assert!(pair_records(b"two\nlines\n", format!("{id}\n").as_bytes()).is_err());
     }
-
     #[test]
-    fn rejects_malformed_records() {
-        let error = parse_records(b"not-a-record\0").unwrap_err();
-        assert!(error.to_string().contains("not a multiple of 5"));
-    }
-
-    #[test]
-    fn decoding_is_lossy_and_neutralizes_terminal_controls() {
-        let records = parse_records(b"id\0short\0A\xff\x1b[31m\x002026\0sub\tject\0").unwrap();
-        assert_eq!(records[0].author, "A��[31m");
-        assert_eq!(records[0].subject, "sub�ject");
-        assert!(!records[0].author.chars().any(char::is_control));
+    fn only_sgr_survives_and_plain_text_is_stable() {
+        let input = "\x1b[31mred\x1b[m\x1b[2J\x1b]52;clipboard\x07\t";
+        let safe = safe_text(input, true);
+        assert_eq!(safe, "\x1b[31mred\x1b[m�[2J�]52;clipboard��");
+        assert_eq!(safe_text(&safe, false), "red�[2J�]52;clipboard��");
     }
 }

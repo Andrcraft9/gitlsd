@@ -10,8 +10,8 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::app::{App, Screen};
@@ -77,12 +77,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             let items: Vec<_> = app
                 .records
                 .iter()
-                .map(|record| {
-                    ListItem::new(Line::from(format!(
-                        "{} {} {:<18} {}",
-                        record.short_id, record.date, record.author, record.subject
-                    )))
-                })
+                .map(|record| ListItem::new(styled_line(&record.display)))
                 .collect();
             let list = List::new(items)
                 .block(Block::default().title(" gitlsd log ").borders(Borders::ALL))
@@ -108,6 +103,76 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     let status = app.input_label().unwrap_or_else(|| app.status.clone());
     frame.render_widget(Paragraph::new(status), chunks[1]);
+}
+
+fn styled_line(text: &str) -> Line<'_> {
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut remainder = text;
+    while let Some(start) = remainder.find("\x1b[") {
+        spans.push(Span::styled(&remainder[..start], style));
+        let sequence = &remainder[start + 2..];
+        let Some(end) = sequence.find('m') else {
+            break;
+        };
+        let values: Vec<u16> = sequence[..end]
+            .split(';')
+            .map(|value| value.parse().unwrap_or(0))
+            .collect();
+        let mut values = values.into_iter();
+        while let Some(value) = values.next() {
+            match value {
+                0 => style = Style::default(),
+                1 => style = style.add_modifier(Modifier::BOLD),
+                2 => style = style.add_modifier(Modifier::DIM),
+                3 => style = style.add_modifier(Modifier::ITALIC),
+                4 => style = style.add_modifier(Modifier::UNDERLINED),
+                5 => style = style.add_modifier(Modifier::SLOW_BLINK),
+                7 => style = style.add_modifier(Modifier::REVERSED),
+                8 => style = style.add_modifier(Modifier::HIDDEN),
+                9 => style = style.add_modifier(Modifier::CROSSED_OUT),
+                22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+                23 => style = style.remove_modifier(Modifier::ITALIC),
+                24 => style = style.remove_modifier(Modifier::UNDERLINED),
+                25 => style = style.remove_modifier(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK),
+                27 => style = style.remove_modifier(Modifier::REVERSED),
+                28 => style = style.remove_modifier(Modifier::HIDDEN),
+                29 => style = style.remove_modifier(Modifier::CROSSED_OUT),
+                30..=37 => style = style.fg(Color::Indexed((value - 30) as u8)),
+                40..=47 => style = style.bg(Color::Indexed((value - 40) as u8)),
+                90..=97 => style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
+                100..=107 => style = style.bg(Color::Indexed((value - 100 + 8) as u8)),
+                39 => style = style.fg(Color::Reset),
+                49 => style = style.bg(Color::Reset),
+                38 | 48 => {
+                    let color = match values.next() {
+                        Some(5) => values
+                            .next()
+                            .and_then(|n| u8::try_from(n).ok())
+                            .map(Color::Indexed),
+                        Some(2) => match (values.next(), values.next(), values.next()) {
+                            (Some(r), Some(g), Some(b)) if r <= 255 && g <= 255 && b <= 255 => {
+                                Some(Color::Rgb(r as u8, g as u8, b as u8))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(color) = color {
+                        style = if value == 38 {
+                            style.fg(color)
+                        } else {
+                            style.bg(color)
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        remainder = &sequence[end + 1..];
+    }
+    spans.push(Span::styled(remainder, style));
+    Line::from(spans)
 }
 
 fn translate_key(event: KeyEvent) -> Option<Key> {
@@ -140,6 +205,18 @@ mod tests {
     use crate::git::{CommitRecord, GitError};
 
     use super::*;
+
+    #[test]
+    fn renders_git_sgr_as_styles_without_escape_text() {
+        let line = styled_line("\x1b[31;1mred\x1b[m plain\x1b[38;2;1;2;3m rgb");
+        assert_eq!(line.to_string(), "red plain rgb");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Indexed(1)));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            line.spans.last().unwrap().style.fg,
+            Some(Color::Rgb(1, 2, 3))
+        );
+    }
 
     #[test]
     fn translates_supported_terminal_keys_and_ignores_unsupported_keys() {
@@ -175,10 +252,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.records.push(CommitRecord {
             id: "full-id".into(),
-            short_id: "abc1234".into(),
-            author: "Author".into(),
-            date: "2026-09-05".into(),
-            subject: "Rendered subject".into(),
+            display: "abc1234 2026-09-05 Author Rendered subject".into(),
         });
         app.status = "Ready".into();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();

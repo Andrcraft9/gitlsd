@@ -150,7 +150,12 @@ impl Default for Config {
         .collect();
 
         Self {
-            log_command: vec!["log".into()],
+            log_command: vec![
+                "git".into(),
+                "log".into(),
+                "--oneline".into(),
+                "--decorate".into(),
+            ],
             batch_size: 100,
             bindings,
             source: None,
@@ -241,12 +246,13 @@ impl Config {
         };
         match name.as_str() {
             "log" => {
-                if values.first().map(String::as_str) != Some("log") {
+                if values.get(..2) != Some(&["git".to_owned(), "log".to_owned()]) {
                     return Err(ConfigError::new(
                         location,
-                        "`set log` must start with the Git `log` subcommand",
+                        "required form: `set log git log <options>`",
                     ));
                 }
+                validate_log(values).map_err(|reason| ConfigError::new(location, reason))?;
                 self.log_command = values.to_vec();
             }
             "batch-size" => {
@@ -329,6 +335,115 @@ impl Config {
         );
         lines
     }
+}
+
+fn validate_log(arguments: &[String]) -> Result<(), String> {
+    let mut one_line = false;
+    let mut arguments = arguments[2..].iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            break;
+        }
+        let name = argument.split('=').next().unwrap_or(argument);
+        if !argument.contains('=')
+            && matches!(
+                name,
+                "--grep"
+                    | "--author"
+                    | "--committer"
+                    | "--since"
+                    | "--until"
+                    | "--after"
+                    | "--before"
+                    | "--date"
+                    | "--encoding"
+                    | "--max-count"
+                    | "--skip"
+                    | "-n"
+                    | "-S"
+                    | "-G"
+            )
+        {
+            arguments.next();
+            continue;
+        }
+        if matches!(
+            name,
+            "--graph"
+                | "-p"
+                | "-u"
+                | "--patch"
+                | "--raw"
+                | "--stat"
+                | "--numstat"
+                | "--shortstat"
+                | "--summary"
+                | "--name-only"
+                | "--name-status"
+                | "--patch-with-raw"
+                | "--patch-with-stat"
+                | "--full-diff"
+                | "--binary"
+                | "--check"
+                | "--show-signature"
+                | "--notes"
+                | "--show-notes"
+                | "--log-size"
+                | "-c"
+                | "--cc"
+                | "-z"
+                | "--null"
+                | "--walk-reflogs"
+        ) || name.starts_with("--dirstat")
+            || name.starts_with("-U")
+            || name.starts_with("-L")
+            || name.starts_with("-p") && !name.starts_with("--")
+            || name == "-g"
+        {
+            return Err(format!(
+                "incompatible option `{argument}`; use a one-line `git log --oneline` or `--format` command"
+            ));
+        }
+        if argument == "--oneline" {
+            one_line = true;
+        }
+        if matches!(name, "--format" | "--pretty") {
+            let format = if let Some((_, value)) = argument.split_once('=') {
+                value
+            } else {
+                arguments.next().map(String::as_str).unwrap_or("")
+            };
+            let format = format
+                .strip_prefix("format:")
+                .or_else(|| format.strip_prefix("tformat:"))
+                .unwrap_or(format);
+            let checked = format
+                .replace("%%", "")
+                .replace("% ", "%")
+                .replace("%-", "%");
+            let lower = checked.to_lowercase();
+            if matches!(
+                format,
+                "short" | "medium" | "full" | "fuller" | "email" | "mboxrd" | "raw"
+            ) || ["%n", "%b", "%B", "%N", "%GG", "%+", "%w("]
+                .iter()
+                .any(|token| checked.contains(token))
+                || lower.contains("%x0a")
+                || lower.contains("%x0d")
+                || lower.contains("%x00")
+                || format.contains(['\n', '\r'])
+            {
+                return Err(format!(
+                    "incompatible format `{format}`; use `--oneline` or a one-line format such as `--format=%h %s`"
+                ));
+            }
+            one_line = true;
+        }
+    }
+    if !one_line {
+        return Err("multiline default format is incompatible; add `--oneline` or a one-line `--format` to `set log git log <options>`".into());
+    }
+    Ok(())
 }
 
 fn without_optional_separator(input: &[String]) -> Vec<String> {
@@ -427,14 +542,23 @@ mod tests {
     #[test]
     fn parses_settings_bindings_quotes_and_comments() {
         let config = Config::parse(
-            "set log = log --all --author 'Grace Hopper' '' = # comment\nset batch-size 7\nbind x move-down\nbind = quit\nbind semicolon = help",
+            "set log = git log --oneline --all --author 'Grace Hopper' '' = # comment\nset batch-size 7\nbind x move-down\nbind = quit\nbind semicolon = help",
             Path::new("sample.conf"),
         )
         .unwrap();
 
         assert_eq!(
             config.log_command,
-            ["log", "--all", "--author", "Grace Hopper", "", "="]
+            [
+                "git",
+                "log",
+                "--oneline",
+                "--all",
+                "--author",
+                "Grace Hopper",
+                "",
+                "="
+            ]
         );
         assert_eq!(config.batch_size, 7);
         assert_eq!(config.action_for(&Key::Char('x')), Some(Action::MoveDown));
@@ -442,7 +566,7 @@ mod tests {
         assert_eq!(config.action_for(&Key::Char(';')), Some(Action::Help));
         assert_eq!(
             config.help_lines()[0],
-            "setting.log=\"log\" \"--all\" \"--author\" \"Grace Hopper\" \"\" \"=\""
+            "setting.log=\"git\" \"log\" \"--oneline\" \"--all\" \"--author\" \"Grace Hopper\" \"\" \"=\""
         );
     }
 

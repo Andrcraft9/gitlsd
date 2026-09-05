@@ -55,6 +55,6 @@ flowchart LR
 
 - `Config` is the resolved runtime policy. `Key` represents frontend-independent input and maps to `Action`, the application command vocabulary.
 - `HistorySource` is the application-facing repository port. `GitHistory` implements it using the Git CLI, while tests can provide deterministic in-memory sources.
-- `CommitRecord` is the display-oriented commit data that crosses the repository boundary.
+- `CommitRecord` pairs a stable commit ID with Git-produced one-line display text. `GitHistory` runs the configured full `git log` argv with pagination and no external pager, then a companion ID-only query with the same selection and pagination. Configuration rejects multiline and expanded output so rows remain selectable commits. Safe ANSI SGR is retained for interactive styling and stripped for search and debug snapshots; other terminal controls are neutralized. Rust does not reconstruct Git presentation fields.
 - `App` is the central state machine. `Screen` and `InputMode` describe its active presentation and text-entry state; frontends observe and drive this state rather than duplicating it.
 - `ui::run` and `debug::run_script` are peer frontend entry points over the same `App` and `HistorySource` contracts.

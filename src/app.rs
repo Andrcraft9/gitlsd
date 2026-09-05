@@ -286,10 +286,9 @@ impl App {
 }
 
 fn matches_record(record: &CommitRecord, query: &str) -> bool {
-    record.subject.to_lowercase().contains(query)
-        || record.author.to_lowercase().contains(query)
-        || record.id.to_lowercase().contains(query)
-        || record.short_id.to_lowercase().contains(query)
+    crate::git::safe_text(&record.display, false)
+        .to_lowercase()
+        .contains(query)
 }
 
 #[cfg(test)]
@@ -320,10 +319,7 @@ mod tests {
         (0..count)
             .map(|index| CommitRecord {
                 id: format!("id-{index}"),
-                short_id: format!("{index:07}"),
-                author: "Author".into(),
-                date: "2026-09-05".into(),
-                subject: format!("Subject {index}"),
+                display: format!("Subject {index}"),
             })
             .collect()
     }

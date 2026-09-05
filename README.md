@@ -25,14 +25,16 @@ By default, gitlsd reads `$XDG_CONFIG_HOME/gitlsd/config` when `XDG_CONFIG_HOME`
 Configuration is line-oriented. Whitespace separates arguments, single and double quotes preserve whitespace, backslash escapes a character, and `#` starts a comment outside quotes. `=` is optional:
 
 ```text
-set log = log --all --first-parent
+set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
 bind j move-down
 bind x quit
 bind semicolon command
 ```
 
-`set log` supplies argv following the `git` executable and must begin with the `log` subcommand. Empty quoted arguments and literal `=` arguments are preserved. gitlsd appends machine-output and pagination arguments. The command is executed directly, never through a shell, with Git paging and color disabled. Batch size must be greater than zero.
+`set log` supplies the full command and must begin with `git log`. The default is `git log --oneline --decorate`. Empty quoted arguments and literal `=` arguments are preserved. Git owns the displayed text: for example, `set log git log --format='%h %an: %s'` selects a custom one-line presentation. gitlsd adds pagination before any `-- <path>` arguments and disables external paging. Commands execute directly without a shell. Batch size must be greater than zero.
+
+Each row must represent one commit. Multiline formats and graph, stat, patch, notes, and signature output are rejected with a configuration error; use `--oneline` or a one-line `--format`. A companion query retrieves stable commit IDs using the same history selection and pagination. Search matches displayed text. Git ANSI SGR colors are rendered interactively and stripped from deterministic debug output; other terminal controls are neutralized.
 
 Keys are a single character or one of `up`, `down`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, and `quit`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every log argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
 

@@ -38,10 +38,15 @@ pub fn snapshot(app: &App) -> String {
     writeln!(output, "selected={}", app.selected).unwrap();
     if let Some(record) = app.selected_record() {
         writeln!(output, "commit={}", record.id).unwrap();
-        writeln!(output, "subject={}", record.subject).unwrap();
+        writeln!(
+            output,
+            "display={}",
+            crate::git::safe_text(&record.display, false)
+        )
+        .unwrap();
     } else {
         writeln!(output, "commit=").unwrap();
-        writeln!(output, "subject=").unwrap();
+        writeln!(output, "display=").unwrap();
     }
     writeln!(output, "status={}", app.status.replace('\n', " ")).unwrap();
     if app.screen == Screen::Help {
@@ -55,10 +60,8 @@ pub fn snapshot(app: &App) -> String {
             let marker = if index == app.selected { '>' } else { ' ' };
             writeln!(
                 output,
-                "{marker} {index} {} {} {}",
-                record.short_id,
-                record.date,
-                record.subject.replace('\n', " ")
+                "{marker} {index} {}",
+                crate::git::safe_text(&record.display, false)
             )
             .unwrap();
         }
