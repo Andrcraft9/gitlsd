@@ -329,6 +329,8 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
 
 fn translate_mouse(event: MouseEvent) -> Option<crate::config::Action> {
     match event.kind {
+        MouseEventKind::ScrollUp => Some(crate::config::Action::MoveUp),
+        MouseEventKind::ScrollDown => Some(crate::config::Action::MoveDown),
         MouseEventKind::ScrollLeft => Some(crate::config::Action::ScrollLeft),
         MouseEventKind::ScrollRight => Some(crate::config::Action::ScrollRight),
         _ => None,
@@ -390,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn translates_horizontal_mouse_events() {
+    fn translates_scroll_mouse_events() {
         let event = |kind| MouseEvent {
             kind,
             column: 0,
@@ -405,7 +407,14 @@ mod tests {
             translate_mouse(event(MouseEventKind::ScrollRight)),
             Some(Action::ScrollRight)
         );
-        assert_eq!(translate_mouse(event(MouseEventKind::ScrollUp)), None);
+        assert_eq!(
+            translate_mouse(event(MouseEventKind::ScrollUp)),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            translate_mouse(event(MouseEventKind::ScrollDown)),
+            Some(Action::MoveDown)
+        );
     }
 
     #[test]
