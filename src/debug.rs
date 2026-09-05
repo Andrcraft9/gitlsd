@@ -39,6 +39,24 @@ pub fn snapshot(app: &App) -> String {
     writeln!(output, "preview.visible={}", app.preview_visible).unwrap();
     writeln!(output, "preview.focused={}", app.preview_focused).unwrap();
     writeln!(output, "preview.offset={}", app.preview_offset).unwrap();
+    writeln!(
+        output,
+        "log.horizontal-offset={}",
+        app.log_horizontal_offset
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "preview.horizontal-offset={}",
+        app.preview_horizontal_offset
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "help.horizontal-offset={}",
+        app.help_horizontal_offset
+    )
+    .unwrap();
     if let Some(record) = app.selected_record() {
         writeln!(output, "commit={}", record.id).unwrap();
         writeln!(
@@ -123,5 +141,31 @@ mod tests {
         let output = snapshot(&app);
         assert!(output.contains("red�[2J"));
         assert!(!output.contains('\x1b'));
+    }
+
+    #[test]
+    fn scripted_horizontal_navigation_exposes_view_offsets() {
+        let mut app = App::new(Config::default());
+        app.records.push(CommitRecord {
+            id: "id".into(),
+            display: "wide enough row".into(),
+        });
+        let output = run_script(&mut app, &mut Empty, "right;right;left").unwrap();
+        assert!(output.contains("log.horizontal-offset=1\n"));
+        assert!(output.contains("preview.horizontal-offset=0\n"));
+        assert!(output.contains("help.horizontal-offset=0\n"));
+    }
+
+    #[test]
+    fn scripted_home_and_end_jump_horizontal_offsets() {
+        let mut app = App::new(Config::default());
+        app.records.push(CommitRecord {
+            id: "id".into(),
+            display: "wide enough row".into(),
+        });
+        let end = run_script(&mut app, &mut Empty, "end").unwrap();
+        assert!(end.contains("log.horizontal-offset=14\n"));
+        let start = run_script(&mut app, &mut Empty, "home").unwrap();
+        assert!(start.contains("log.horizontal-offset=0\n"));
     }
 }

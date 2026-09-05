@@ -2,7 +2,10 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -13,8 +16,10 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Screen};
+use crate::app::{App, InputMode, Screen};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -25,12 +30,30 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
         session
             .terminal
             .draw(|frame| render(frame, app, &mut log_state))?;
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key_event) = event::read()?
-            && key_event.kind != KeyEventKind::Release
-            && let Some(key) = translate_key(key_event)
-        {
-            app.handle_key(key, source);
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
+                    if let Some(key) = translate_key(key_event) {
+                        let size = session.terminal.size()?;
+                        app.set_horizontal_viewport_width(active_content_width(
+                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            app,
+                        ));
+                        app.handle_key(key, source);
+                    }
+                }
+                Event::Mouse(mouse_event) if matches!(&app.input, InputMode::Normal) => {
+                    if let Some(action) = translate_mouse(mouse_event) {
+                        let size = session.terminal.size()?;
+                        app.set_horizontal_viewport_width(active_content_width(
+                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            app,
+                        ));
+                        app.dispatch(action, source);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -44,9 +67,9 @@ impl TerminalSession {
     fn start() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
-            let _ = execute!(stdout, LeaveAlternateScreen, Show);
+            let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
             return Err(error);
         }
         match Terminal::new(CrosstermBackend::new(stdout)) {
@@ -54,7 +77,7 @@ impl TerminalSession {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, LeaveAlternateScreen, Show);
+                let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
                 Err(error)
             }
         }
@@ -64,9 +87,43 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            Show
+        );
         let _ = self.terminal.show_cursor();
     }
+}
+
+fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let pane = match app.screen {
+        Screen::Help => chunks[0],
+        Screen::Log if app.preview_visible => {
+            let direction = if chunks[0].width > chunks[0].height {
+                Direction::Horizontal
+            } else {
+                Direction::Vertical
+            };
+            let panes = Layout::default()
+                .direction(direction)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[0]);
+            if app.preview_focused {
+                panes[1]
+            } else {
+                panes[0]
+            }
+        }
+        Screen::Log => chunks[0],
+    };
+    let marker_width = usize::from(app.screen == Screen::Log && !app.preview_focused) * 2;
+    usize::from(pane.width.saturating_sub(2)).saturating_sub(marker_width)
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) {
@@ -80,7 +137,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
             let items: Vec<_> = app
                 .records
                 .iter()
-                .map(|record| ListItem::new(styled_line(&record.display)))
+                .map(|record| {
+                    ListItem::new(scrolled_line(&record.display, app.log_horizontal_offset))
+                })
                 .collect();
             let list = List::new(items)
                 .block(Block::default().title(" gitlsd log ").borders(Borders::ALL))
@@ -109,7 +168,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
                     .collect::<Vec<_>>();
                 frame.render_widget(
                     Paragraph::new(preview)
-                        .scroll((app.preview_offset.try_into().unwrap_or(u16::MAX), 0))
+                        .scroll((
+                            app.preview_offset.try_into().unwrap_or(u16::MAX),
+                            app.preview_horizontal_offset.try_into().unwrap_or(u16::MAX),
+                        ))
                         .block(
                             Block::default()
                                 .title(if app.preview_focused {
@@ -129,7 +191,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
             let text = app.config.help_lines().join("\n");
             frame.render_widget(
                 Paragraph::new(text)
-                    .scroll((app.help_offset.try_into().unwrap_or(u16::MAX), 0))
+                    .scroll((
+                        app.help_offset.try_into().unwrap_or(u16::MAX),
+                        app.help_horizontal_offset.try_into().unwrap_or(u16::MAX),
+                    ))
                     .block(Block::default().title(" help ").borders(Borders::ALL)),
                 chunks[0],
             );
@@ -210,6 +275,32 @@ fn styled_line(text: &str) -> Line<'_> {
     Line::from(spans)
 }
 
+fn scrolled_line(text: &str, offset: usize) -> Line<'_> {
+    if offset == 0 {
+        return styled_line(text);
+    }
+    let line = styled_line(text);
+    let mut remaining = offset;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let mut content = String::new();
+        for grapheme in span.content.graphemes(true) {
+            let width = UnicodeWidthStr::width(grapheme);
+            if remaining >= width {
+                remaining -= width;
+            } else if remaining > 0 {
+                remaining = 0;
+            } else {
+                content.push_str(grapheme);
+            }
+        }
+        if !content.is_empty() {
+            spans.push(Span::styled(content, span.style));
+        }
+    }
+    Line::from(spans)
+}
+
 fn translate_key(event: KeyEvent) -> Option<Key> {
     if event.modifiers.contains(KeyModifiers::ALT) {
         return None;
@@ -225,9 +316,21 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
         KeyCode::Down => Some(Key::Down),
         KeyCode::PageUp => Some(Key::PageUp),
         KeyCode::PageDown => Some(Key::PageDown),
+        KeyCode::Home => Some(Key::Home),
+        KeyCode::End => Some(Key::End),
+        KeyCode::Left => Some(Key::Left),
+        KeyCode::Right => Some(Key::Right),
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
+        _ => None,
+    }
+}
+
+fn translate_mouse(event: MouseEvent) -> Option<crate::config::Action> {
+    match event.kind {
+        MouseEventKind::ScrollLeft => Some(crate::config::Action::ScrollLeft),
+        MouseEventKind::ScrollRight => Some(crate::config::Action::ScrollRight),
         _ => None,
     }
 }
@@ -261,6 +364,10 @@ mod tests {
             (KeyCode::Down, KeyModifiers::NONE, Some(Key::Down)),
             (KeyCode::PageUp, KeyModifiers::NONE, Some(Key::PageUp)),
             (KeyCode::PageDown, KeyModifiers::NONE, Some(Key::PageDown)),
+            (KeyCode::Home, KeyModifiers::NONE, Some(Key::Home)),
+            (KeyCode::End, KeyModifiers::NONE, Some(Key::End)),
+            (KeyCode::Left, KeyModifiers::NONE, Some(Key::Left)),
+            (KeyCode::Right, KeyModifiers::NONE, Some(Key::Right)),
             (KeyCode::Esc, KeyModifiers::NONE, Some(Key::Escape)),
             (KeyCode::Enter, KeyModifiers::NONE, Some(Key::Enter)),
             (KeyCode::Backspace, KeyModifiers::NONE, Some(Key::Backspace)),
@@ -280,6 +387,25 @@ mod tests {
         for (code, modifiers, expected) in cases {
             assert_eq!(translate_key(KeyEvent::new(code, modifiers)), expected);
         }
+    }
+
+    #[test]
+    fn translates_horizontal_mouse_events() {
+        let event = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            translate_mouse(event(MouseEventKind::ScrollLeft)),
+            Some(Action::ScrollLeft)
+        );
+        assert_eq!(
+            translate_mouse(event(MouseEventKind::ScrollRight)),
+            Some(Action::ScrollRight)
+        );
+        assert_eq!(translate_mouse(event(MouseEventKind::ScrollUp)), None);
     }
 
     #[test]
@@ -314,14 +440,65 @@ mod tests {
     }
 
     #[test]
+    fn renders_log_at_horizontal_offset() {
+        let mut app = App::new(Config::default());
+        app.records.push(CommitRecord {
+            id: "full-id".into(),
+            display: "prefix-hidden visible-content".into(),
+        });
+        app.preview_visible = false;
+        app.log_horizontal_offset = "prefix-hidden ".len();
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("visible-content"));
+        assert!(!text.contains("prefix-hidden"));
+    }
+
+    #[test]
+    fn renders_log_at_grapheme_display_width_and_preserves_ansi_selected_style() {
+        let mut app = App::new(Config::default());
+        app.records.push(CommitRecord {
+            id: "full-id".into(),
+            display: "\x1b[31m界e\u{301} visible\x1b[m".into(),
+        });
+        app.preview_visible = false;
+        app.log_horizontal_offset = 3;
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("visible"));
+        assert!(!text.contains("界e\u{301}"));
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((3, 1))
+            .expect("visible selected row");
+        assert_eq!(cell.style().fg, Some(Color::Indexed(1)));
+        assert!(cell.style().add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn horizontal_end_skips_a_wide_grapheme_it_cannot_partially_show() {
+        assert_eq!(scrolled_line("界a", 1).to_string(), "a");
+    }
+
+    #[test]
     fn renders_preview_in_both_orientations_and_marks_focus() {
         let mut app = App::new(Config::default());
         app.records.push(CommitRecord {
             id: "id".into(),
             display: "log row".into(),
         });
-        app.preview_lines = vec!["preview content".into()];
+        app.preview_lines = vec!["prefix-hidden preview content".into()];
         app.preview_focused = true;
+        app.preview_horizontal_offset = "prefix-hidden ".len();
         let mut log_state = ListState::default();
         for (width, height) in [(80, 10), (20, 30)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -331,6 +508,7 @@ mod tests {
             let text = buffer_text(&terminal);
             assert!(text.contains("log row"));
             assert!(text.contains("preview content"));
+            assert!(!text.contains("prefix-hidden"));
             assert!(text.contains("focused"));
         }
     }
@@ -366,6 +544,34 @@ mod tests {
         assert!(text.contains("binding."));
         assert!(!text.contains("setting.log"));
         assert!(text.contains("Showing effective configuration"));
+    }
+
+    #[test]
+    fn renders_help_at_horizontal_offset() {
+        struct Empty;
+
+        impl HistorySource for Empty {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        let mut history = Empty;
+        app.dispatch(Action::Help, &mut history);
+        app.help_horizontal_offset = "setting.".len();
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("log=\"git\""));
+        assert!(!text.contains("setting.log"));
     }
 
     #[test]

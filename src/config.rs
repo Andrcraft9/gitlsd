@@ -11,6 +11,10 @@ pub enum Action {
     MoveUp,
     PageDown,
     PageUp,
+    ScrollStart,
+    ScrollEnd,
+    ScrollRight,
+    ScrollLeft,
     Search,
     SearchNext,
     SearchPrevious,
@@ -22,11 +26,15 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::MoveDown,
         Self::MoveUp,
         Self::PageDown,
         Self::PageUp,
+        Self::ScrollStart,
+        Self::ScrollEnd,
+        Self::ScrollRight,
+        Self::ScrollLeft,
         Self::Search,
         Self::SearchNext,
         Self::SearchPrevious,
@@ -43,6 +51,10 @@ impl Action {
             Self::MoveUp => "move-up",
             Self::PageDown => "page-down",
             Self::PageUp => "page-up",
+            Self::ScrollStart => "scroll-start",
+            Self::ScrollEnd => "scroll-end",
+            Self::ScrollRight => "scroll-right",
+            Self::ScrollLeft => "scroll-left",
             Self::Search => "search",
             Self::SearchNext => "search-next",
             Self::SearchPrevious => "search-previous",
@@ -73,6 +85,10 @@ pub enum Key {
     Down,
     PageUp,
     PageDown,
+    Home,
+    End,
+    Left,
+    Right,
     Escape,
     Enter,
     Backspace,
@@ -89,6 +105,10 @@ impl Key {
             Self::Down => "down".into(),
             Self::PageUp => "page-up".into(),
             Self::PageDown => "page-down".into(),
+            Self::Home => "home".into(),
+            Self::End => "end".into(),
+            Self::Left => "left".into(),
+            Self::Right => "right".into(),
             Self::Escape => "esc".into(),
             Self::Enter => "enter".into(),
             Self::Backspace => "backspace".into(),
@@ -106,6 +126,10 @@ impl FromStr for Key {
             "down" => Ok(Self::Down),
             "page-up" | "pgup" => Ok(Self::PageUp),
             "page-down" | "pgdn" => Ok(Self::PageDown),
+            "home" => Ok(Self::Home),
+            "end" => Ok(Self::End),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
             "esc" | "escape" => Ok(Self::Escape),
             "enter" | "return" => Ok(Self::Enter),
             "backspace" | "bs" => Ok(Self::Backspace),
@@ -140,6 +164,10 @@ impl Default for Config {
             (Key::Up, Action::MoveUp),
             (Key::PageDown, Action::PageDown),
             (Key::PageUp, Action::PageUp),
+            (Key::Home, Action::ScrollStart),
+            (Key::End, Action::ScrollEnd),
+            (Key::Right, Action::ScrollRight),
+            (Key::Left, Action::ScrollLeft),
             (Key::Char('/'), Action::Search),
             (Key::Char('n'), Action::SearchNext),
             (Key::Char('N'), Action::SearchPrevious),
@@ -584,6 +612,34 @@ mod tests {
         assert_eq!(
             config.help_lines()[0],
             "setting.log=\"git\" \"log\" \"--oneline\" \"--all\" \"--author\" \"Grace Hopper\" \"\" \"=\""
+        );
+    }
+
+    #[test]
+    fn horizontal_bindings_are_available_by_default_and_configurable() {
+        let config = Config::parse(
+            "bind x scroll-right\nbind y scroll-left\n",
+            Path::new("sample.conf"),
+        )
+        .unwrap();
+        assert_eq!(config.action_for(&Key::Right), Some(Action::ScrollRight));
+        assert_eq!(config.action_for(&Key::Left), Some(Action::ScrollLeft));
+        assert_eq!(config.action_for(&Key::Home), Some(Action::ScrollStart));
+        assert_eq!(config.action_for(&Key::End), Some(Action::ScrollEnd));
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::ScrollRight)
+        );
+        assert_eq!(config.action_for(&Key::Char('y')), Some(Action::ScrollLeft));
+        assert!(
+            config
+                .help_lines()
+                .contains(&"binding.x=scroll-right".into())
+        );
+        assert!(
+            config
+                .help_lines()
+                .contains(&"binding.right=scroll-right".into())
         );
     }
 

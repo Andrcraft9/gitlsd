@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::config::{Action, Config, Key};
 use crate::git::{CommitRecord, GitError, HistorySource};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
@@ -25,10 +26,14 @@ pub struct App {
     pub status: String,
     pub running: bool,
     pub help_offset: usize,
+    pub help_horizontal_offset: usize,
+    pub log_horizontal_offset: usize,
     pub preview_visible: bool,
     pub preview_focused: bool,
     pub preview_lines: Vec<String>,
     pub preview_offset: usize,
+    pub preview_horizontal_offset: usize,
+    horizontal_viewport_width: usize,
     has_more: bool,
     next_offset: usize,
     last_search: Option<String>,
@@ -46,10 +51,14 @@ impl App {
             status: String::new(),
             running: true,
             help_offset: 0,
+            help_horizontal_offset: 0,
+            log_horizontal_offset: 0,
             preview_visible: true,
             preview_focused: false,
             preview_lines: Vec::new(),
             preview_offset: 0,
+            preview_horizontal_offset: 0,
+            horizontal_viewport_width: 1,
             has_more: true,
             next_offset: 0,
             last_search: None,
@@ -117,6 +126,10 @@ impl App {
         }
     }
 
+    pub fn set_horizontal_viewport_width(&mut self, width: usize) {
+        self.horizontal_viewport_width = width.max(1);
+    }
+
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
         if self.preview_focused && self.screen == Screen::Log {
             match action {
@@ -130,6 +143,9 @@ impl App {
                         (self.preview_offset + 10).min(self.preview_lines.len().saturating_sub(1))
                 }
                 Action::PageUp => self.preview_offset = self.preview_offset.saturating_sub(10),
+                Action::ScrollRight => self.scroll_horizontal(action),
+                Action::ScrollLeft => self.scroll_horizontal(action),
+                Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
                 Action::Search => {
                     self.input = InputMode::Search(String::new());
                 }
@@ -155,11 +171,21 @@ impl App {
                 Action::MoveUp => self.help_offset = self.help_offset.saturating_sub(1),
                 Action::PageDown => self.help_offset = (self.help_offset + 10).min(last_line),
                 Action::PageUp => self.help_offset = self.help_offset.saturating_sub(10),
+                Action::ScrollRight => self.scroll_horizontal(action),
+                Action::ScrollLeft => self.scroll_horizontal(action),
+                Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
                 _ => {}
             }
             if matches!(
                 action,
-                Action::MoveDown | Action::MoveUp | Action::PageDown | Action::PageUp
+                Action::MoveDown
+                    | Action::MoveUp
+                    | Action::PageDown
+                    | Action::PageUp
+                    | Action::ScrollStart
+                    | Action::ScrollEnd
+                    | Action::ScrollRight
+                    | Action::ScrollLeft
             ) {
                 return;
             }
@@ -189,6 +215,9 @@ impl App {
                     self.reload_preview(source);
                 }
             }
+            Action::ScrollRight => self.scroll_horizontal(action),
+            Action::ScrollLeft => self.scroll_horizontal(action),
+            Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
             Action::Search => {
                 self.screen = Screen::Log;
                 self.input = InputMode::Search(String::new());
@@ -199,6 +228,7 @@ impl App {
             Action::Help => {
                 self.screen = Screen::Help;
                 self.help_offset = 0;
+                self.help_horizontal_offset = 0;
                 self.status = "Showing effective configuration".into();
             }
             Action::Back => {
@@ -217,6 +247,50 @@ impl App {
                 self.status = "Quit requested".into();
             }
         }
+    }
+
+    fn scroll_horizontal(&mut self, action: Action) {
+        let maximum = self.max_horizontal_offset();
+        let offset = if self.preview_focused && self.screen == Screen::Log {
+            &mut self.preview_horizontal_offset
+        } else if self.screen == Screen::Help {
+            &mut self.help_horizontal_offset
+        } else {
+            &mut self.log_horizontal_offset
+        };
+        *offset = match action {
+            Action::ScrollStart => 0,
+            Action::ScrollEnd => maximum,
+            Action::ScrollLeft => offset.saturating_sub(1),
+            Action::ScrollRight => offset.saturating_add(1).min(maximum),
+            _ => *offset,
+        };
+    }
+
+    fn max_horizontal_offset(&self) -> usize {
+        let content_width = if self.preview_focused && self.screen == Screen::Log {
+            self.preview_lines
+                .iter()
+                .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
+                .max()
+                .unwrap_or(0)
+        } else if self.screen == Screen::Help {
+            self.config
+                .help_lines()
+                .iter()
+                .map(|line| UnicodeWidthStr::width(line.as_str()))
+                .max()
+                .unwrap_or(0)
+        } else {
+            self.records
+                .iter()
+                .map(|record| {
+                    UnicodeWidthStr::width(crate::git::safe_text(&record.display, false).as_str())
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        content_width.saturating_sub(self.horizontal_viewport_width)
     }
 
     fn move_down(&mut self, source: &mut impl HistorySource) {
@@ -338,6 +412,7 @@ impl App {
             return;
         }
         self.preview_offset = 0;
+        self.preview_horizontal_offset = 0;
         self.preview_lines.clear();
         let Some(id) = self.selected_record().map(|record| record.id.clone()) else {
             return;
@@ -387,6 +462,7 @@ impl App {
             "help" | "h" => {
                 self.screen = Screen::Help;
                 self.help_offset = 0;
+                self.help_horizontal_offset = 0;
                 self.status = "Showing effective configuration".into();
             }
             "quit" | "q" => {
@@ -594,6 +670,109 @@ mod tests {
         assert_eq!(app.selected, 1);
         app.dispatch(Action::PageUp, &mut history);
         assert_eq!(app.help_offset, 1);
+    }
+
+    #[test]
+    fn horizontal_scroll_routes_to_active_view_and_clamps_at_zero() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(3),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.selected = 1;
+        app.set_horizontal_viewport_width(3);
+
+        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::ScrollLeft, &mut history);
+        assert_eq!(app.log_horizontal_offset, 1);
+        assert_eq!(app.selected, 1);
+
+        app.dispatch(Action::Help, &mut history);
+        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::ScrollLeft, &mut history);
+        app.dispatch(Action::ScrollLeft, &mut history);
+        assert_eq!(app.help_horizontal_offset, 0);
+        assert_eq!(app.selected, 1);
+
+        app.dispatch(Action::Back, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.preview_lines = vec!["abcdef".into()];
+        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::ScrollLeft, &mut history);
+        assert_eq!(app.preview_horizontal_offset, 1);
+        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn horizontal_start_and_end_use_the_active_pane_width() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "abcdef".into(),
+            }],
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.set_horizontal_viewport_width(3);
+
+        app.dispatch(Action::ScrollEnd, &mut history);
+        assert_eq!(app.log_horizontal_offset, 3);
+        app.dispatch(Action::ScrollStart, &mut history);
+        assert_eq!(app.log_horizontal_offset, 0);
+
+        app.dispatch(Action::Help, &mut history);
+        app.set_horizontal_viewport_width(8);
+        app.dispatch(Action::ScrollEnd, &mut history);
+        assert!(app.help_horizontal_offset > 0);
+        app.dispatch(Action::ScrollStart, &mut history);
+        assert_eq!(app.help_horizontal_offset, 0);
+
+        app.dispatch(Action::Back, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.preview_lines = vec!["abcdef".into()];
+        app.set_horizontal_viewport_width(3);
+        app.dispatch(Action::ScrollEnd, &mut history);
+        assert_eq!(app.preview_horizontal_offset, 3);
+        app.dispatch(Action::ScrollStart, &mut history);
+        assert_eq!(app.preview_horizontal_offset, 0);
+    }
+
+    #[test]
+    fn horizontal_end_accounts_for_the_log_selection_marker() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "abcdef".into(),
+            }],
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.set_horizontal_viewport_width(2);
+        app.dispatch(Action::ScrollEnd, &mut history);
+        assert_eq!(app.log_horizontal_offset, 4);
+    }
+
+    #[test]
+    fn reloading_preview_and_opening_help_reset_horizontal_offsets() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(2),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.preview_horizontal_offset = 4;
+        app.dispatch(Action::MoveDown, &mut history);
+        assert_eq!(app.preview_horizontal_offset, 0);
+
+        app.help_horizontal_offset = 4;
+        app.dispatch(Action::Help, &mut history);
+        assert_eq!(app.help_horizontal_offset, 0);
     }
 
     #[test]

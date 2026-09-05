@@ -9,6 +9,8 @@
 | `j`, Down | Select next commit |
 | `k`, Up | Select previous commit |
 | Page Down, Page Up | Move ten rows |
+| Right, Left | Scroll the active log, preview, or help pane horizontally |
+| Home, End | Jump to the horizontal beginning or end of the active pane |
 | `/` | Enter a case-insensitive search |
 | `n`, `N` | Repeat search forward or backward, wrapping at the ends |
 | `:` | Enter a command |
@@ -39,7 +41,7 @@ bind semicolon command
 
 Each row must represent one commit. Multiline formats and graph, stat, patch, notes, and signature output are rejected with a configuration error; use `--oneline` or a one-line `--format`. A companion query retrieves stable commit IDs using the same history selection and pagination. Search matches displayed text. Git ANSI SGR colors are rendered interactively and stripped from deterministic debug output; other terminal controls are neutralized.
 
-Keys are a single character or one of `up`, `down`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, and `toggle-preview`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every log argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
+Keys are a single character or one of `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `scroll-start`, `scroll-end`, `scroll-right`, `scroll-left`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, and `toggle-preview`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every log argv element reversibly so empty and whitespace-containing arguments remain distinguishable. Horizontal mouse-wheel or touchpad events scroll the active pane when the terminal reports them.
 
 The selected commit preview is visible by default. It runs `git show --stat --patch` with the selected full commit ID appended; `set preview git show ...` customizes that command. Enter focuses the preview, where navigation and search act only on preview text.
 
