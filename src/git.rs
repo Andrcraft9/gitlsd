@@ -11,19 +11,28 @@ pub struct CommitRecord {
 
 pub trait HistorySource {
     fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError>;
+    fn load_preview(&mut self, _id: &str) -> Result<Vec<String>, GitError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug)]
 pub struct GitHistory {
     directory: PathBuf,
     command: Vec<String>,
+    preview_command: Vec<String>,
 }
 
 impl GitHistory {
-    pub fn new(directory: impl Into<PathBuf>, command: Vec<String>) -> Self {
+    pub fn new(
+        directory: impl Into<PathBuf>,
+        command: Vec<String>,
+        preview_command: Vec<String>,
+    ) -> Self {
         Self {
             directory: directory.into(),
             command,
+            preview_command,
         }
     }
 
@@ -78,6 +87,19 @@ impl HistorySource for GitHistory {
         );
         let ids = self.run(&arguments)?;
         pair_records(&display, &ids)
+    }
+
+    fn load_preview(&mut self, id: &str) -> Result<Vec<String>, GitError> {
+        let mut arguments = self.preview_command[1..].to_vec();
+        let insertion = arguments
+            .iter()
+            .position(|argument| argument == "--")
+            .unwrap_or(arguments.len());
+        arguments.insert(insertion, id.into());
+        Ok(String::from_utf8_lossy(&self.run(&arguments)?)
+            .lines()
+            .map(|line| safe_text(line, true))
+            .collect())
     }
 }
 

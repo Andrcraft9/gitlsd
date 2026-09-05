@@ -25,9 +25,14 @@ pub struct App {
     pub status: String,
     pub running: bool,
     pub help_offset: usize,
+    pub preview_visible: bool,
+    pub preview_focused: bool,
+    pub preview_lines: Vec<String>,
+    pub preview_offset: usize,
     has_more: bool,
     next_offset: usize,
     last_search: Option<String>,
+    last_preview_search: Option<String>,
 }
 
 impl App {
@@ -41,17 +46,23 @@ impl App {
             status: String::new(),
             running: true,
             help_offset: 0,
+            preview_visible: true,
+            preview_focused: false,
+            preview_lines: Vec::new(),
+            preview_offset: 0,
             has_more: true,
             next_offset: 0,
             last_search: None,
+            last_preview_search: None,
         }
     }
 
     pub fn initialize(&mut self, source: &mut impl HistorySource) -> Result<(), GitError> {
         self.fetch_more(source)?;
+        self.reload_preview(source);
         if self.records.is_empty() {
             self.status = "No commits found".into();
-        } else {
+        } else if self.status.is_empty() {
             self.status = format!("Loaded {} commits", self.records.len());
         }
         Ok(())
@@ -91,6 +102,12 @@ impl App {
             },
             InputMode::Normal => {
                 if key == Key::Enter {
+                    if self.screen == Screen::Log
+                        && self.preview_visible
+                        && self.selected_record().is_some()
+                    {
+                        self.preview_focused = true;
+                    }
                     return;
                 }
                 if let Some(action) = self.config.action_for(&key) {
@@ -101,6 +118,36 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
+        if self.preview_focused && self.screen == Screen::Log {
+            match action {
+                Action::MoveDown => {
+                    self.preview_offset =
+                        (self.preview_offset + 1).min(self.preview_lines.len().saturating_sub(1))
+                }
+                Action::MoveUp => self.preview_offset = self.preview_offset.saturating_sub(1),
+                Action::PageDown => {
+                    self.preview_offset =
+                        (self.preview_offset + 10).min(self.preview_lines.len().saturating_sub(1))
+                }
+                Action::PageUp => self.preview_offset = self.preview_offset.saturating_sub(10),
+                Action::Search => {
+                    self.input = InputMode::Search(String::new());
+                }
+                Action::SearchNext => self.repeat_preview_search(true),
+                Action::SearchPrevious => self.repeat_preview_search(false),
+                Action::Back => {
+                    self.preview_focused = false;
+                    self.input = InputMode::Normal;
+                }
+                Action::Quit | Action::TogglePreview => {}
+                _ => {}
+            }
+            if matches!(action, Action::Quit | Action::TogglePreview) {
+                // These remain global even while preview owns navigation.
+            } else {
+                return;
+            }
+        }
         if self.screen == Screen::Help {
             let last_line = self.config.help_lines().len().saturating_sub(1);
             match action {
@@ -119,8 +166,10 @@ impl App {
         }
         match action {
             Action::MoveDown => self.move_down(source),
-            Action::MoveUp => self.move_up(),
+            Action::MoveUp => self.move_up(source),
             Action::PageDown => {
+                let preview_visible = self.preview_visible;
+                self.preview_visible = false;
                 for _ in 0..10 {
                     let before = self.selected;
                     self.move_down(source);
@@ -128,8 +177,18 @@ impl App {
                         break;
                     }
                 }
+                self.preview_visible = preview_visible;
+                if preview_visible {
+                    self.reload_preview(source);
+                }
             }
-            Action::PageUp => self.selected = self.selected.saturating_sub(10),
+            Action::PageUp => {
+                let before = self.selected;
+                self.selected = self.selected.saturating_sub(10);
+                if self.selected != before {
+                    self.reload_preview(source);
+                }
+            }
             Action::Search => {
                 self.screen = Screen::Log;
                 self.input = InputMode::Search(String::new());
@@ -145,6 +204,13 @@ impl App {
             Action::Back => {
                 self.screen = Screen::Log;
                 self.input = InputMode::Normal;
+            }
+            Action::TogglePreview => {
+                self.preview_visible = !self.preview_visible;
+                self.preview_focused = false;
+                if self.preview_visible {
+                    self.reload_preview(source);
+                }
             }
             Action::Quit => {
                 self.running = false;
@@ -164,6 +230,7 @@ impl App {
         }
         if self.selected + 1 < self.records.len() {
             self.selected += 1;
+            self.reload_preview(source);
         }
         if !fetched_to_move && self.selected + 1 == self.records.len() && self.has_more {
             if let Err(error) = self.fetch_more(source) {
@@ -172,8 +239,12 @@ impl App {
         }
     }
 
-    fn move_up(&mut self) {
+    fn move_up(&mut self, source: &mut impl HistorySource) {
+        let before = self.selected;
         self.selected = self.selected.saturating_sub(1);
+        if self.selected != before {
+            self.reload_preview(source);
+        }
     }
 
     fn fetch_more(&mut self, source: &mut impl HistorySource) -> Result<(), GitError> {
@@ -200,6 +271,11 @@ impl App {
     fn submit_search(&mut self, query: String, forward: bool, source: &mut impl HistorySource) {
         if query.is_empty() {
             self.status = "Search query is empty".into();
+            return;
+        }
+        if self.preview_focused {
+            self.last_preview_search = Some(query);
+            self.repeat_preview_search(forward);
             return;
         }
         self.last_search = Some(query);
@@ -250,9 +326,59 @@ impl App {
         match found {
             Some(index) => {
                 self.selected = index;
+                self.reload_preview(source);
                 self.status = format!("Match for `{query}`");
             }
             None => self.status = format!("No match for `{query}`"),
+        }
+    }
+
+    fn reload_preview(&mut self, source: &mut impl HistorySource) {
+        if !self.preview_visible {
+            return;
+        }
+        self.preview_offset = 0;
+        self.preview_lines.clear();
+        let Some(id) = self.selected_record().map(|record| record.id.clone()) else {
+            return;
+        };
+        match source.load_preview(&id) {
+            Ok(lines) => self.preview_lines = lines,
+            Err(error) => self.status = format!("Could not load preview: {error}"),
+        }
+    }
+
+    fn repeat_preview_search(&mut self, forward: bool) {
+        let Some(query) = self.last_preview_search.clone() else {
+            self.status = "No previous search".into();
+            return;
+        };
+        let query_lower = query.to_lowercase();
+        let length = self.preview_lines.len();
+        if length == 0 {
+            self.status = format!("No match for `{query}`");
+            return;
+        }
+        let mut indices: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new(
+                (self.preview_offset + 1..length).chain(0..=self.preview_offset.min(length - 1)),
+            )
+        } else {
+            Box::new(
+                (0..self.preview_offset)
+                    .rev()
+                    .chain((self.preview_offset..length).rev()),
+            )
+        };
+        if let Some(index) = indices.find(|&index| {
+            crate::git::safe_text(&self.preview_lines[index], false)
+                .to_lowercase()
+                .contains(&query_lower)
+        }) {
+            self.preview_offset = index;
+            self.status = format!("Match for `{query}`");
+        } else {
+            self.status = format!("No match for `{query}`");
         }
     }
 
@@ -504,5 +630,100 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["id-0", "id-1", "id-2"]
         );
+    }
+
+    #[test]
+    fn preview_focus_scrolling_search_and_escape_do_not_move_log_selection() {
+        struct PreviewHistory;
+
+        impl HistorySource for PreviewHistory {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(records(2))
+            }
+
+            fn load_preview(&mut self, id: &str) -> Result<Vec<String>, GitError> {
+                Ok(vec![
+                    format!("{id} first"),
+                    "second needle".into(),
+                    "third".into(),
+                ])
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        let mut history = PreviewHistory;
+        app.initialize(&mut history).unwrap();
+        assert!(app.preview_visible);
+        assert_eq!(app.preview_lines[0], "id-0 first");
+
+        app.handle_key(Key::Enter, &mut history);
+        app.dispatch(Action::MoveDown, &mut history);
+        assert!(app.preview_focused);
+        assert_eq!(app.preview_offset, 1);
+        assert_eq!(app.selected, 0);
+
+        app.handle_key(Key::Char('/'), &mut history);
+        for key in "needle".chars().map(Key::Char).chain([Key::Enter]) {
+            app.handle_key(key, &mut history);
+        }
+        assert_eq!(app.preview_offset, 1);
+        app.dispatch(Action::Back, &mut history);
+        app.dispatch(Action::MoveDown, &mut history);
+        assert!(!app.preview_focused);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.preview_lines[0], "id-1 first");
+    }
+
+    #[test]
+    fn preview_failure_keeps_log_usable_and_reports_status() {
+        struct FailingPreview;
+
+        impl HistorySource for FailingPreview {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(records(2))
+            }
+
+            fn load_preview(&mut self, _id: &str) -> Result<Vec<String>, GitError> {
+                Err(GitError::Output("planned preview failure".into()))
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        let mut history = FailingPreview;
+        app.initialize(&mut history).unwrap();
+        assert!(app.status.contains("planned preview failure"));
+        app.dispatch(Action::MoveDown, &mut history);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn preview_focus_keeps_quit_and_toggle_global_and_does_not_escape_help() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(1),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.handle_key(Key::Enter, &mut history);
+        app.dispatch(Action::TogglePreview, &mut history);
+        assert!(!app.preview_visible);
+        assert!(!app.preview_focused);
+        app.preview_visible = true;
+        app.screen = Screen::Help;
+        app.handle_key(Key::Enter, &mut history);
+        assert!(!app.preview_focused);
+        app.screen = Screen::Log;
+        app.preview_focused = true;
+        app.dispatch(Action::Quit, &mut history);
+        assert!(!app.running);
     }
 }

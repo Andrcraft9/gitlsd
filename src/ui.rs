@@ -88,7 +88,39 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             } else {
                 Some(app.selected)
             });
-            frame.render_stateful_widget(list, chunks[0], &mut state);
+            if app.preview_visible {
+                let direction = if chunks[0].width > chunks[0].height {
+                    Direction::Horizontal
+                } else {
+                    Direction::Vertical
+                };
+                let panes = Layout::default()
+                    .direction(direction)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(chunks[0]);
+                frame.render_stateful_widget(list, panes[0], &mut state);
+                let preview = app
+                    .preview_lines
+                    .iter()
+                    .map(|line| styled_line(line))
+                    .collect::<Vec<_>>();
+                frame.render_widget(
+                    Paragraph::new(preview)
+                        .scroll((app.preview_offset.try_into().unwrap_or(u16::MAX), 0))
+                        .block(
+                            Block::default()
+                                .title(if app.preview_focused {
+                                    " preview (focused) "
+                                } else {
+                                    " preview "
+                                })
+                                .borders(Borders::ALL),
+                        ),
+                    panes[1],
+                );
+            } else {
+                frame.render_stateful_widget(list, chunks[0], &mut state);
+            }
         }
         Screen::Help => {
             let text = app.config.help_lines().join("\n");
@@ -255,6 +287,7 @@ mod tests {
             display: "abc1234 2026-09-05 Author Rendered subject".into(),
         });
         app.status = "Ready".into();
+        app.preview_visible = false;
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let text = buffer_text(&terminal);
@@ -272,6 +305,25 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn renders_preview_in_both_orientations_and_marks_focus() {
+        let mut app = App::new(Config::default());
+        app.records.push(CommitRecord {
+            id: "id".into(),
+            display: "log row".into(),
+        });
+        app.preview_lines = vec!["preview content".into()];
+        app.preview_focused = true;
+        for (width, height) in [(80, 10), (20, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("log row"));
+            assert!(text.contains("preview content"));
+            assert!(text.contains("focused"));
+        }
     }
 
     #[test]

@@ -15,6 +15,8 @@
 | `?` | Show help and the effective configuration |
 | Escape | Return to the log or cancel input |
 | `q`, Ctrl-C | Quit |
+| `p` | Toggle selected-commit preview |
+| Enter | Focus preview; Escape returns to log |
 
 Commands are `:help`/`:h` and `:quit`/`:q`. An empty or unknown command is reported in the status line.
 
@@ -27,6 +29,7 @@ Configuration is line-oriented. Whitespace separates arguments, single and doubl
 ```text
 set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
+set preview = git show --stat --patch
 bind j move-down
 bind x quit
 bind semicolon command
@@ -36,7 +39,9 @@ bind semicolon command
 
 Each row must represent one commit. Multiline formats and graph, stat, patch, notes, and signature output are rejected with a configuration error; use `--oneline` or a one-line `--format`. A companion query retrieves stable commit IDs using the same history selection and pagination. Search matches displayed text. Git ANSI SGR colors are rendered interactively and stripped from deterministic debug output; other terminal controls are neutralized.
 
-Keys are a single character or one of `up`, `down`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, and `quit`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every log argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
+Keys are a single character or one of `up`, `down`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, and `toggle-preview`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every log argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
+
+The selected commit preview is visible by default. It runs `git show --stat --patch` with the selected full commit ID appended; `set preview git show ...` customizes that command. Enter focuses the preview, where navigation and search act only on preview text.
 
 Invalid configuration reports its file, line, and reason.
 

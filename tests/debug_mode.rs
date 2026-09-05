@@ -20,6 +20,24 @@ fn config_file(contents: &str) -> PathBuf {
 }
 
 fn run(script: &str, config: &str) -> Output {
+    let script = if script.is_empty() {
+        "p".to_owned()
+    } else {
+        format!("p;{script}")
+    };
+    command()
+        .args([
+            "--config",
+            config_file(config).to_str().unwrap(),
+            "--debug",
+            &script,
+        ])
+        .current_dir(fixture())
+        .output()
+        .unwrap()
+}
+
+fn run_preview(script: &str, config: &str) -> Output {
     command()
         .args([
             "--config",
@@ -117,6 +135,22 @@ fn configured_git_argv_preserves_format_and_filters_history() {
     ));
     assert!(output.contains("commit=f2138f311d2a3a64a4121756ffda9cbef84c527b\n"));
     assert!(output.contains("display=CUSTOM Correctly validate light transition properties\n"));
+}
+
+#[test]
+fn preview_uses_selected_non_head_commit_id() {
+    let output = stdout(run_preview(
+        "down",
+        "set preview git show --format=%H --no-patch\n",
+    ));
+    let selected = "aaed0069a29bd77ca37a12f4477b41eb3fa9572f";
+    assert!(output.contains(&format!("commit={selected}\n")));
+    assert!(
+        output
+            .split("preview:\n")
+            .nth(1)
+            .is_some_and(|preview| preview.contains(selected))
+    );
 }
 
 #[test]
@@ -228,7 +262,7 @@ fn discovers_default_config_from_home() {
 
 #[test]
 fn invalid_script_key_and_config_return_actionable_errors() {
-    let invalid_key = run("not-a-key", "");
+    let invalid_key = run_preview("not-a-key", "");
     assert!(!invalid_key.status.success());
     assert!(
         String::from_utf8_lossy(&invalid_key.stderr)
@@ -254,4 +288,41 @@ fn git_failure_outside_repository_is_actionable() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("Git log failed"));
     assert!(error.contains("not a git repository"));
+}
+
+#[test]
+fn preview_is_enabled_by_default_and_custom_command_is_used() {
+    let default = stdout(run_preview("", ""));
+    assert!(default.contains("preview.visible=true\n"));
+    assert!(default.contains("preview:\n"));
+    assert!(default.contains("Fix globe draping glitch"));
+
+    let custom = stdout(run_preview(
+        "",
+        "set preview git show --format='CUSTOM %H' --no-patch\n",
+    ));
+    assert!(custom.contains("  CUSTOM 446bbe66962e288ae9b2ab8b500b92dfa4da892a\n"));
+}
+
+#[test]
+fn preview_toggle_focus_scrolling_and_search_are_scriptable() {
+    let hidden = stdout(run_preview("p", ""));
+    assert!(hidden.contains("preview.visible=false\n"));
+    assert!(!hidden.contains("preview:\n"));
+
+    let focused = stdout(run_preview("enter;down;/;F;i;x;enter", ""));
+    assert!(focused.contains("preview.focused=true\n"));
+    assert!(focused.contains("preview.offset="));
+    assert!(focused.contains("selected=0\n"));
+    assert!(focused.contains("status=Match for `Fix`\n"));
+}
+
+#[test]
+fn preview_command_failure_is_recoverable() {
+    let output = stdout(run_preview(
+        "down",
+        "set preview git show --not-a-real-option\n",
+    ));
+    assert!(output.contains("selected=1\n"));
+    assert!(output.contains("status=Could not load preview:"));
 }

@@ -18,10 +18,11 @@ pub enum Action {
     Help,
     Back,
     Quit,
+    TogglePreview,
 }
 
 impl Action {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::MoveDown,
         Self::MoveUp,
         Self::PageDown,
@@ -33,6 +34,7 @@ impl Action {
         Self::Help,
         Self::Back,
         Self::Quit,
+        Self::TogglePreview,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,6 +50,7 @@ impl Action {
             Self::Help => "help",
             Self::Back => "back",
             Self::Quit => "quit",
+            Self::TogglePreview => "toggle-preview",
         }
     }
 }
@@ -122,6 +125,7 @@ impl FromStr for Key {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub log_command: Vec<String>,
+    pub preview_command: Vec<String>,
     pub batch_size: usize,
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
@@ -144,6 +148,7 @@ impl Default for Config {
             (Key::Escape, Action::Back),
             (Key::Char('q'), Action::Quit),
             (Key::Ctrl('c'), Action::Quit),
+            (Key::Char('p'), Action::TogglePreview),
         ]
         .into_iter()
         .collect();
@@ -154,6 +159,13 @@ impl Default for Config {
                 "log".into(),
                 "--oneline".into(),
                 "--decorate".into(),
+                "--color=always".into(),
+            ],
+            preview_command: vec![
+                "git".into(),
+                "show".into(),
+                "--stat".into(),
+                "--patch".into(),
                 "--color=always".into(),
             ],
             batch_size: 100,
@@ -272,6 +284,15 @@ impl Config {
                     ));
                 }
             }
+            "preview" => {
+                if values.get(..2) != Some(&["git".to_owned(), "show".to_owned()]) {
+                    return Err(ConfigError::new(
+                        location,
+                        "required form: `set preview git show <options>`",
+                    ));
+                }
+                self.preview_command = values.to_vec();
+            }
             _ => {
                 return Err(ConfigError::new(
                     location,
@@ -321,6 +342,14 @@ impl Config {
                     .join(" ")
             ),
             format!("setting.batch-size={}", self.batch_size),
+            format!(
+                "setting.preview={}",
+                self.preview_command
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             format!(
                 "setting.config={}",
                 self.source
@@ -575,6 +604,16 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "bad.conf:1: batch size must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn invalid_preview_command_reports_file_and_line() {
+        let error =
+            Config::parse("set preview git log --oneline", Path::new("bad.conf")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "bad.conf:1: required form: `set preview git show <options>`"
         );
     }
 }

@@ -2,7 +2,8 @@
 title: 'Preview mode'
 type: 'feature'
 created: '2026-09-05'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '0fe196b46d2e7eaaec6e31d114056ea63257982a'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -16,7 +17,7 @@ context:
 
 **Problem:** The log only shows one-line commit rows, forcing users to leave gitlsd to inspect the selected commit. Users need an optional, keyboard-driven preview that retains the fast log-navigation workflow.
 
-**Approach:** Show the selected commit through a configurable Git command in an automatically oriented split beside the log. Keep preview visible by default, toggle it with a configurable `P` binding, and let Enter focus the preview for familiar scrolling and searching until Escape returns focus to the log.
+**Approach:** Show the selected commit through a configurable Git command in an automatically oriented split beside the log. Keep preview visible by default, toggle it with a configurable `p` binding, and let Enter focus the preview for familiar scrolling and searching until Escape returns focus to the log.
 
 ## Boundaries & Constraints
 
@@ -29,7 +30,7 @@ context:
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|---------------|----------------------------|----------------|
 | Default preview | Non-empty log after startup | Selected commit preview is visible using `git show --stat --patch`; selection changes reload it at offset zero | A failed preview leaves log usable and reports the Git error in status |
-| Toggle | `P` while preview is visible/hidden | Preview is hidden/shown; showing reloads the selected commit | No selected commit yields an empty preview without launching Git |
+| Toggle | `p` while preview is visible/hidden | Preview is hidden/shown; showing reloads the selected commit | No selected commit yields an empty preview without launching Git |
 | Focus and navigation | Enter from log, then scroll keys, then Escape | Preview becomes active, scroll keys change only preview offset, Escape restores log focus | Offset is clamped to available content |
 | Preview search | `/query`, `n`, or `N` while preview is focused | Case-insensitive matching scrolls to matching preview lines and wraps | Empty/no-match status mirrors log search behavior |
 | Custom command | `set preview git show ...` | Exact argv is executed with the selected commit ID appended | Invalid command shape is rejected with file and line context |
@@ -39,7 +40,7 @@ context:
 
 ## Code Map
 
-- `src/config.rs` -- add the preview command setting and toggle action/default `P` binding; reuse tokenization, argv quoting, action parsing, and effective-help conventions. Reserve Enter as the fixed focus transition.
+- `src/config.rs` -- add the preview command setting and toggle action/default `p` binding; reuse tokenization, argv quoting, action parsing, and effective-help conventions. Reserve Enter as the fixed focus transition.
 - `src/git.rs` -- extend the repository boundary with preview loading by commit ID; reuse direct process execution and `safe_text`, while preserving multiline output.
 - `src/app.rs` -- own preview visibility, focus, content, scroll position, preview-search state, selection-triggered reloads, and recoverable errors in the shared state machine.
 - `src/ui.rs` -- render focused/unfocused preview and log panes, dynamically selecting horizontal or vertical `Layout`; reuse ANSI-to-ratatui styling for multiline preview lines.
@@ -71,6 +72,20 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| Finding | Verdict | Evidence and route |
+| --- | --- | --- |
+| Preview focus swallows Quit | medium | Verified in `App::dispatch`: the focused branch handles no `Quit`, so `q` does nothing. Patch. |
+| Preview focus swallows TogglePreview | medium | Verified in `App::dispatch`: `p` cannot hide a focused preview. Patch. |
+| Enter can focus preview from Help | low | Verified: Enter sets focus without checking `Screen::Log`; Escape then returns to a focused preview. Patch. |
+| Help-screen Enter focus persists | low | Carried duplicate of the independently reported Help-screen Enter finding; verified at the same branch. Patch. |
+| Preview ID after `--` becomes a pathspec | medium | Verified in `GitHistory::load_preview`; `git show options -- <id>` interprets the ID as a path. Patch. |
+| PageDown reloads every intermediate preview | low | Verified: its loop calls `move_down`, which reloads after each selection. Patch. |
+| Split renderer lacks preview-enabled tests | low | Verified by the existing UI tests explicitly hiding preview; both orientation branches are untested. Patch. |
+| Preview sanitization lacks direct coverage | low | Verified: existing sanitization tests cover log text only. Patch. |
+| Non-HEAD preview command argv is unverified | low | Verified by the coverage review; current real-Git custom test inspects only HEAD. Patch. |
+| Split orientation lacks active renderer verification | low | Carried duplicate of the independently reported renderer-coverage finding; verified at the same branch. Patch. |
+| Invalid preview configuration lacks test coverage | low | Verified: configuration tests do not exercise `set preview` rejection. Patch. |
 
 ## Design Notes
 

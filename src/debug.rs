@@ -36,6 +36,9 @@ pub fn snapshot(app: &App) -> String {
     writeln!(output, "running={}", app.running).unwrap();
     writeln!(output, "loaded={}", app.records.len()).unwrap();
     writeln!(output, "selected={}", app.selected).unwrap();
+    writeln!(output, "preview.visible={}", app.preview_visible).unwrap();
+    writeln!(output, "preview.focused={}", app.preview_focused).unwrap();
+    writeln!(output, "preview.offset={}", app.preview_offset).unwrap();
     if let Some(record) = app.selected_record() {
         writeln!(output, "commit={}", record.id).unwrap();
         writeln!(
@@ -55,6 +58,12 @@ pub fn snapshot(app: &App) -> String {
             writeln!(output, "  {line}").unwrap();
         }
     } else {
+        if app.preview_visible {
+            writeln!(output, "preview:").unwrap();
+            for line in &app.preview_lines {
+                writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
+            }
+        }
         writeln!(output, "rows:").unwrap();
         for (index, record) in app.records.iter().enumerate() {
             let marker = if index == app.selected { '>' } else { ' ' };
@@ -101,5 +110,18 @@ mod tests {
         let mut app = App::new(config);
         let snapshot = run_script(&mut app, &mut Empty, "semicolon").unwrap();
         assert!(snapshot.contains("running=false\n"));
+    }
+
+    #[test]
+    fn preview_snapshot_strips_unsafe_controls_and_sgr() {
+        let mut app = App::new(Config::default());
+        app.preview_lines = vec!["\x1b[31mred\x1b[m\x1b[2J".into()];
+        assert_eq!(
+            crate::git::safe_text(&app.preview_lines[0], true),
+            "\x1b[31mred\x1b[m�[2J"
+        );
+        let output = snapshot(&app);
+        assert!(output.contains("red�[2J"));
+        assert!(!output.contains('\x1b'));
     }
 }
