@@ -434,22 +434,22 @@ impl App {
             self.status = format!("No match for `{query}`");
             return;
         }
-        let mut indices: Box<dyn Iterator<Item = usize>> = if forward {
-            Box::new(
-                (self.preview_offset + 1..length).chain(0..=self.preview_offset.min(length - 1)),
-            )
-        } else {
-            Box::new(
-                (0..self.preview_offset)
-                    .rev()
-                    .chain((self.preview_offset..length).rev()),
-            )
-        };
-        if let Some(index) = indices.find(|&index| {
-            crate::git::safe_text(&self.preview_lines[index], false)
+        let matches = |index: &usize| {
+            crate::git::safe_text(&self.preview_lines[*index], false)
                 .to_lowercase()
                 .contains(&query_lower)
-        }) {
+        };
+        let index = if forward {
+            (self.preview_offset + 1..length)
+                .chain(0..=self.preview_offset.min(length - 1))
+                .find(matches)
+        } else {
+            (0..self.preview_offset)
+                .rev()
+                .chain((self.preview_offset..length).rev())
+                .find(matches)
+        };
+        if let Some(index) = index {
             self.preview_offset = index;
             self.status = format!("Match for `{query}`");
         } else {
@@ -856,6 +856,43 @@ mod tests {
         assert_eq!(app.selected, 1);
         assert_eq!(app.preview_offset, 0);
         assert_eq!(app.preview_lines[0], "id-1 first");
+    }
+
+    #[test]
+    fn repeated_preview_search_wraps_in_both_directions() {
+        let mut app = App::new(Config::default());
+        app.preview_lines = vec![
+            "match first".into(),
+            "skip".into(),
+            "match second".into(),
+            "match third".into(),
+        ];
+        app.last_preview_search = Some("match".into());
+
+        app.preview_offset = 1;
+        app.repeat_preview_search(true);
+        assert_eq!(app.preview_offset, 2);
+        app.repeat_preview_search(true);
+        assert_eq!(app.preview_offset, 3);
+        app.repeat_preview_search(true);
+        assert_eq!(app.preview_offset, 0);
+
+        app.repeat_preview_search(false);
+        assert_eq!(app.preview_offset, 3);
+        app.repeat_preview_search(false);
+        assert_eq!(app.preview_offset, 2);
+
+        app.preview_lines = vec!["only match".into(), "skip".into()];
+        app.preview_offset = 1;
+        app.repeat_preview_search(true);
+        assert_eq!(app.preview_offset, 0);
+        app.repeat_preview_search(false);
+        assert_eq!(app.preview_offset, 0);
+
+        app.last_preview_search = Some("missing".into());
+        app.repeat_preview_search(true);
+        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.status, "No match for `missing`");
     }
 
     #[test]
