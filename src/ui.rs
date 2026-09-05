@@ -20,8 +20,11 @@ use crate::git::HistorySource;
 
 pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
     let mut session = TerminalSession::start()?;
+    let mut log_state = ListState::default();
     while app.running {
-        session.terminal.draw(|frame| render(frame, app))?;
+        session
+            .terminal
+            .draw(|frame| render(frame, app, &mut log_state))?;
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key_event) = event::read()?
             && key_event.kind != KeyEventKind::Release
@@ -66,7 +69,7 @@ impl Drop for TerminalSession {
     }
 }
 
-fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -83,7 +86,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
                 .block(Block::default().title(" gitlsd log ").borders(Borders::ALL))
                 .highlight_symbol("> ")
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            let mut state = ListState::default().with_selected(if app.records.is_empty() {
+            log_state.select(if app.records.is_empty() {
                 None
             } else {
                 Some(app.selected)
@@ -98,7 +101,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
                     .direction(direction)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[0]);
-                frame.render_stateful_widget(list, panes[0], &mut state);
+                frame.render_stateful_widget(list, panes[0], log_state);
                 let preview = app
                     .preview_lines
                     .iter()
@@ -119,7 +122,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
                     panes[1],
                 );
             } else {
-                frame.render_stateful_widget(list, chunks[0], &mut state);
+                frame.render_stateful_widget(list, chunks[0], log_state);
             }
         }
         Screen::Help => {
@@ -288,8 +291,11 @@ mod tests {
         });
         app.status = "Ready".into();
         app.preview_visible = false;
+        let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("gitlsd log"));
         assert!(text.contains("abc1234 2026-09-05 Author"));
@@ -316,9 +322,12 @@ mod tests {
         });
         app.preview_lines = vec!["preview content".into()];
         app.preview_focused = true;
+        let mut log_state = ListState::default();
         for (width, height) in [(80, 10), (20, 30)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| render(frame, &app)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
             let text = buffer_text(&terminal);
             assert!(text.contains("log row"));
             assert!(text.contains("preview content"));
@@ -347,13 +356,74 @@ mod tests {
         app.dispatch(Action::PageDown, &mut history);
         assert_eq!(app.selected, 4);
 
+        let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("help"));
         assert!(text.contains("binding."));
         assert!(!text.contains("setting.log"));
         assert!(text.contains("Showing effective configuration"));
+    }
+
+    #[test]
+    fn keeps_log_cursor_in_view_while_reversing_direction() {
+        struct Empty;
+
+        impl HistorySource for Empty {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        app.records = (0..24)
+            .map(|index| CommitRecord {
+                id: index.to_string(),
+                display: format!("row {index}"),
+            })
+            .collect();
+        let mut history = Empty;
+
+        for (width, height) in [(80, 10), (20, 30)] {
+            let mut log_state = ListState::default();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for _ in 0..18 {
+                app.dispatch(Action::MoveDown, &mut history);
+            }
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
+            let bottom_offset = log_state.offset();
+            assert!(bottom_offset > 0);
+
+            app.dispatch(Action::MoveUp, &mut history);
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
+            assert_eq!(log_state.offset(), bottom_offset);
+
+            while app.selected > log_state.offset() {
+                app.dispatch(Action::MoveUp, &mut history);
+                terminal
+                    .draw(|frame| render(frame, &app, &mut log_state))
+                    .unwrap();
+            }
+            let top_offset = log_state.offset();
+            app.dispatch(Action::MoveUp, &mut history);
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
+            assert_eq!(log_state.offset(), top_offset - 1);
+
+            app.selected = 0;
+        }
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
