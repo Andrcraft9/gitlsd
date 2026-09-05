@@ -1,0 +1,11 @@
+[package]
+name = "gitlsd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A minimal Git browser for logs, status, and diffs"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.6.2", features = ["derive"] }
+ratatui = "0.29.0"
