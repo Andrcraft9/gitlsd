@@ -7,5 +7,7 @@
 ## Planned
 
 - [x] Preview split view
-- [ ] Show mode
-- [ ] Diff/status mode (staged/unstaged changes)
+- [ ] Preview filter config to support delta
+- [ ] Multi-line log entries: navigate entries not lines
+- [ ] Show mode: file explorer, diff per file
+- [ ] Status mode (staged/unstaged changes)
