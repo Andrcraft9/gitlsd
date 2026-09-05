@@ -89,7 +89,7 @@ fn crossing_batch_boundary_loads_additional_distinct_commits() {
 }
 
 #[test]
-fn search_repeats_forward_and_backward_with_wraparound() {
+fn search_repeats_without_crossing_boundaries() {
     let unloaded = stdout(run("/;C;o;r;r;e;c;t;l;y;enter", "set batch-size 2\n"));
     assert!(unloaded.contains("commit=f2138f311d2a3a64a4121756ffda9cbef84c527b\n"));
     assert!(unloaded.contains("loaded=4\n"));
@@ -100,6 +100,20 @@ fn search_repeats_forward_and_backward_with_wraparound() {
     let previous = stdout(run("/;G;L;space;J;S;enter;n;N", "set batch-size 10\n"));
     assert!(previous.contains("commit=aaed0069a29bd77ca37a12f4477b41eb3fa9572f\n"));
     assert!(previous.contains("status=Match for `GL JS`\n"));
+
+    let end = stdout(run(
+        "/;v;3;.;3;0;.;0;-;r;c;.;1;enter;n;n",
+        "set log git log --oneline HEAD~5..HEAD\nset batch-size 10\n",
+    ));
+    assert!(end.contains("commit=5b3e8f5e72efbdd144143a2cbbcd5e6477491433\n"));
+    assert!(end.contains("status=(END)\n"));
+
+    let top = stdout(run(
+        "/;v;3;.;3;0;.;0;-;r;c;.;1;enter;N",
+        "set log git log --oneline HEAD~5..HEAD\nset batch-size 10\n",
+    ));
+    assert!(top.contains("commit=61a574eb73905ede0e7d94fb22e1ba0ec4d9a00a\n"));
+    assert!(top.contains("status=(TOP)\n"));
 }
 
 #[test]

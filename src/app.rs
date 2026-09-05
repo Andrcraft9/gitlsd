@@ -349,14 +349,18 @@ impl App {
         }
         if self.preview_focused {
             self.last_preview_search = Some(query);
-            self.repeat_preview_search(forward);
+            self.search_preview(forward, true);
             return;
         }
         self.last_search = Some(query);
-        self.repeat_search(forward, source);
+        self.search_log(forward, true, source);
     }
 
     fn repeat_search(&mut self, forward: bool, source: &mut impl HistorySource) {
+        self.search_log(forward, false, source);
+    }
+
+    fn search_log(&mut self, forward: bool, wrap: bool, source: &mut impl HistorySource) {
         let Some(query) = self.last_search.clone() else {
             self.status = "No previous search".into();
             return;
@@ -375,7 +379,7 @@ impl App {
                 .find(|index| matches_record(&self.records[*index], &query_lower))
         };
 
-        while found.is_none() && self.has_more {
+        while forward && found.is_none() && self.has_more {
             let previous_length = self.records.len();
             if let Err(error) = self.fetch_more(source) {
                 self.status = format!("Could not continue search: {error}");
@@ -387,7 +391,7 @@ impl App {
             }
         }
 
-        if found.is_none() {
+        if found.is_none() && wrap {
             found = if forward {
                 (0..=self.selected)
                     .find(|index| matches_record(&self.records[*index], &query_lower))
@@ -402,6 +406,14 @@ impl App {
                 self.selected = index;
                 self.reload_preview(source);
                 self.status = format!("Match for `{query}`");
+            }
+            None if !wrap
+                && self
+                    .records
+                    .iter()
+                    .any(|record| matches_record(record, &query_lower)) =>
+            {
+                self.status = if forward { "(END)" } else { "(TOP)" }.into()
             }
             None => self.status = format!("No match for `{query}`"),
         }
@@ -424,6 +436,10 @@ impl App {
     }
 
     fn repeat_preview_search(&mut self, forward: bool) {
+        self.search_preview(forward, false);
+    }
+
+    fn search_preview(&mut self, forward: bool, wrap: bool) {
         let Some(query) = self.last_preview_search.clone() else {
             self.status = "No previous search".into();
             return;
@@ -440,18 +456,29 @@ impl App {
                 .contains(&query_lower)
         };
         let index = if forward {
-            (self.preview_offset + 1..length)
-                .chain(0..=self.preview_offset.min(length - 1))
-                .find(matches)
+            let later = (self.preview_offset + 1..length).find(&matches);
+            later.or_else(|| {
+                wrap.then(|| (0..=self.preview_offset.min(length - 1)).find(&matches))
+                    .flatten()
+            })
         } else {
-            (0..self.preview_offset)
-                .rev()
-                .chain((self.preview_offset..length).rev())
-                .find(matches)
+            let earlier = (0..self.preview_offset).rev().find(&matches);
+            earlier.or_else(|| {
+                wrap.then(|| (self.preview_offset..length).rev().find(&matches))
+                    .flatten()
+            })
         };
         if let Some(index) = index {
             self.preview_offset = index;
             self.status = format!("Match for `{query}`");
+        } else if !wrap
+            && self
+                .preview_lines
+                .iter()
+                .enumerate()
+                .any(|(index, _)| matches(&index))
+        {
+            self.status = if forward { "(END)" } else { "(TOP)" }.into();
         } else {
             self.status = format!("No match for `{query}`");
         }
@@ -867,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_preview_search_wraps_in_both_directions() {
+    fn repeated_preview_search_stops_at_both_boundaries() {
         let mut app = App::new(Config::default());
         app.preview_lines = vec![
             "match first".into(),
@@ -883,23 +910,90 @@ mod tests {
         app.repeat_preview_search(true);
         assert_eq!(app.preview_offset, 3);
         app.repeat_preview_search(true);
-        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.preview_offset, 3);
+        assert_eq!(app.status, "(END)");
 
         app.repeat_preview_search(false);
-        assert_eq!(app.preview_offset, 3);
-        app.repeat_preview_search(false);
         assert_eq!(app.preview_offset, 2);
+        app.repeat_preview_search(false);
+        assert_eq!(app.preview_offset, 0);
+        app.repeat_preview_search(false);
+        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.status, "(TOP)");
 
         app.preview_lines = vec!["only match".into(), "skip".into()];
         app.preview_offset = 1;
         app.repeat_preview_search(true);
-        assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.preview_offset, 1);
+        assert_eq!(app.status, "(END)");
         app.repeat_preview_search(false);
         assert_eq!(app.preview_offset, 0);
 
         app.last_preview_search = Some("missing".into());
         app.repeat_preview_search(true);
         assert_eq!(app.preview_offset, 0);
+        assert_eq!(app.status, "No match for `missing`");
+    }
+
+    #[test]
+    fn repeated_log_search_loads_batches_and_stops_at_both_boundaries() {
+        let config = Config {
+            batch_size: 2,
+            ..Config::default()
+        };
+        let mut history = FakeHistory {
+            records: vec![
+                CommitRecord {
+                    id: "0".into(),
+                    display: "match first".into(),
+                },
+                CommitRecord {
+                    id: "1".into(),
+                    display: "skip".into(),
+                },
+                CommitRecord {
+                    id: "2".into(),
+                    display: "match second".into(),
+                },
+                CommitRecord {
+                    id: "3".into(),
+                    display: "skip again".into(),
+                },
+                CommitRecord {
+                    id: "4".into(),
+                    display: "match third".into(),
+                },
+            ],
+            fail_at: None,
+        };
+        let mut app = App::new(config);
+        app.initialize(&mut history).unwrap();
+
+        app.last_search = Some("match".into());
+        app.repeat_search(false, &mut history);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.status, "(TOP)");
+        assert_eq!(app.records.len(), 2);
+
+        app.submit_search("match".into(), true, &mut history);
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.records.len(), 4);
+        app.repeat_search(true, &mut history);
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.records.len(), 5);
+        app.repeat_search(true, &mut history);
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.status, "(END)");
+
+        app.repeat_search(false, &mut history);
+        assert_eq!(app.selected, 2);
+        app.selected = 0;
+        app.repeat_search(false, &mut history);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.status, "(TOP)");
+
+        app.submit_search("missing".into(), true, &mut history);
+        assert_eq!(app.selected, 0);
         assert_eq!(app.status, "No match for `missing`");
     }
 

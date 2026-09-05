@@ -12,7 +12,7 @@
 | Right, Left | Scroll the active log, preview, or help pane horizontally |
 | Home, End | Jump to the horizontal beginning or end of the active pane |
 | `/` | Enter a case-insensitive search and highlight all matches |
-| `n`, `N` | Repeat search forward or backward, wrapping at the ends |
+| `n`, `N` | Repeat search until `(END)` or `(TOP)` without wraparound |
 | `:` | Enter a command |
 | `?` | Show help and the effective configuration |
 | Escape | Return to the log or cancel input |
