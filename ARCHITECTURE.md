@@ -11,7 +11,7 @@
 - **Functional core, imperative shell.** The application state machine owns navigation, screens, search, commands, and incremental loading. Terminal I/O, configuration discovery, environment access, and child processes remain at the edges. Dependencies point inward from frontends and adapters toward state and data abstractions.
 - **Debug mode is the testing foundation.** Interactive mode and debug mode drive the same application state machine. Debug mode replaces terminal events with scripted keys and terminal rendering with stable text snapshots, making end-to-end tests deterministic while still exercising configuration and the real Git process boundary. It is available only in debug builds.
 - **Frontends are replaceable boundaries.** Ratatui and Crossterm belong to the interactive frontend rather than the application core. A frontend translates input into shared keys and actions, then renders application state; it does not own behavior.
-- **Terminal lifecycle is owned at the edge.** The interactive frontend is responsible for entering and restoring terminal state on successful exits and errors. Core behavior remains independent of terminal setup and cleanup.
+- **Terminal lifecycle is owned at the edge.** The interactive frontend is responsible for entering and restoring terminal state on successful exits and errors. It retains alternate-screen rendering but does not capture mouse input, so the terminal can perform native text selection and copying. Core behavior remains independent of terminal setup and cleanup.
 
 ## Overview
 

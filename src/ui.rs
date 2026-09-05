@@ -1,10 +1,9 @@
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::time::Duration;
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -19,7 +18,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, InputMode, Screen};
+use crate::app::{App, Screen};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -42,16 +41,6 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
                         app.handle_key(key, source);
                     }
                 }
-                Event::Mouse(mouse_event) if matches!(&app.input, InputMode::Normal) => {
-                    if let Some(action) = translate_mouse(mouse_event) {
-                        let size = session.terminal.size()?;
-                        app.set_horizontal_viewport_width(active_content_width(
-                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                            app,
-                        ));
-                        app.dispatch(action, source);
-                    }
-                }
                 _ => {}
             }
         }
@@ -67,9 +56,9 @@ impl TerminalSession {
     fn start() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = enter_terminal(&mut stdout) {
             let _ = disable_raw_mode();
-            let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
+            let _ = restore_terminal(&mut stdout);
             return Err(error);
         }
         match Terminal::new(CrosstermBackend::new(stdout)) {
@@ -77,7 +66,7 @@ impl TerminalSession {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
+                let _ = restore_terminal(&mut stdout);
                 Err(error)
             }
         }
@@ -87,14 +76,17 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            DisableMouseCapture,
-            LeaveAlternateScreen,
-            Show
-        );
+        let _ = restore_terminal(self.terminal.backend_mut());
         let _ = self.terminal.show_cursor();
     }
+}
+
+fn enter_terminal(writer: &mut impl Write) -> io::Result<()> {
+    execute!(writer, DisableMouseCapture, EnterAlternateScreen)
+}
+
+fn restore_terminal(writer: &mut impl Write) -> io::Result<()> {
+    execute!(writer, DisableMouseCapture, LeaveAlternateScreen, Show)
 }
 
 fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
@@ -327,16 +319,6 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
     }
 }
 
-fn translate_mouse(event: MouseEvent) -> Option<crate::config::Action> {
-    match event.kind {
-        MouseEventKind::ScrollUp => Some(crate::config::Action::MoveUp),
-        MouseEventKind::ScrollDown => Some(crate::config::Action::MoveDown),
-        MouseEventKind::ScrollLeft => Some(crate::config::Action::ScrollLeft),
-        MouseEventKind::ScrollRight => Some(crate::config::Action::ScrollRight),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::backend::TestBackend;
@@ -392,29 +374,22 @@ mod tests {
     }
 
     #[test]
-    fn translates_scroll_mouse_events() {
-        let event = |kind| MouseEvent {
-            kind,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert_eq!(
-            translate_mouse(event(MouseEventKind::ScrollLeft)),
-            Some(Action::ScrollLeft)
+    fn terminal_lifecycle_disables_mouse_capture_without_enabling_it() {
+        let mut output = Vec::new();
+        enter_terminal(&mut output).unwrap();
+        restore_terminal(&mut output).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output
+                .starts_with("\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049h")
         );
-        assert_eq!(
-            translate_mouse(event(MouseEventKind::ScrollRight)),
-            Some(Action::ScrollRight)
-        );
-        assert_eq!(
-            translate_mouse(event(MouseEventKind::ScrollUp)),
-            Some(Action::MoveUp)
-        );
-        assert_eq!(
-            translate_mouse(event(MouseEventKind::ScrollDown)),
-            Some(Action::MoveDown)
-        );
+        assert!(output.contains("\x1b[?1049l\x1b[?25h"));
+        assert!(!output.contains("\x1b[?1000h"));
+        assert!(!output.contains("\x1b[?1002h"));
+        assert!(!output.contains("\x1b[?1003h"));
+        assert!(!output.contains("\x1b[?1015h"));
+        assert!(!output.contains("\x1b[?1006h"));
     }
 
     #[test]
