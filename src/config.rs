@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -456,20 +455,8 @@ fn without_optional_separator(input: &[String]) -> Vec<String> {
 }
 
 fn default_path() -> Option<PathBuf> {
-    default_path_from(
-        env::var_os("XDG_CONFIG_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-    )
-}
-
-fn default_path_from(config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    if let Some(config_home) = config_home {
-        let path = Path::new(config_home);
-        if !config_home.is_empty() && path.is_absolute() {
-            return Some(path.join("gitlsd/config"));
-        }
-    }
-    home.filter(|home| !home.is_empty())
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
         .map(|home| PathBuf::from(home).join(".config/gitlsd/config"))
 }
 
@@ -568,23 +555,6 @@ mod tests {
         assert_eq!(
             config.help_lines()[0],
             "setting.log=\"git\" \"log\" \"--oneline\" \"--all\" \"--author\" \"Grace Hopper\" \"\" \"=\""
-        );
-    }
-
-    #[test]
-    fn xdg_path_requires_nonempty_absolute_value() {
-        let home = OsStr::new("/home/tester");
-        assert_eq!(
-            default_path_from(Some(OsStr::new("")), Some(home)),
-            Some(PathBuf::from("/home/tester/.config/gitlsd/config"))
-        );
-        assert_eq!(
-            default_path_from(Some(OsStr::new("relative")), Some(home)),
-            Some(PathBuf::from("/home/tester/.config/gitlsd/config"))
-        );
-        assert_eq!(
-            default_path_from(Some(OsStr::new("/xdg")), Some(home)),
-            Some(PathBuf::from("/xdg/gitlsd/config"))
         );
     }
 

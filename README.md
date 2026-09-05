@@ -20,7 +20,7 @@ Commands are `:help`/`:h` and `:quit`/`:q`. An empty or unknown command is repor
 
 ## Configuration
 
-By default, gitlsd reads `$XDG_CONFIG_HOME/gitlsd/config` when `XDG_CONFIG_HOME` is a non-empty absolute path. Otherwise it falls back to `$HOME/.config/gitlsd/config`. A missing default file is fine; other filesystem errors are reported. Select another file with `--config PATH`; an explicitly selected file must exist and be valid.
+By default, gitlsd reads `$HOME/.config/gitlsd/config`. A missing default file is fine; other filesystem errors are reported. Select another file with `--config PATH`; an explicitly selected file must exist and be valid.
 
 Configuration is line-oriented. Whitespace separates arguments, single and double quotes preserve whitespace, backslash escapes a character, and `#` starts a comment outside quotes. `=` is optional:
 

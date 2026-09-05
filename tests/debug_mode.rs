@@ -204,11 +204,10 @@ fn incompatible_configuration_has_location_and_actionable_error() {
 }
 
 #[test]
-fn discovers_default_config_from_absolute_xdg_home() {
+fn discovers_default_config_from_home() {
     let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
-    let config_home =
-        std::env::temp_dir().join(format!("gitlsd-xdg-{}-{index}", std::process::id()));
-    let config_directory = config_home.join("gitlsd");
+    let home = std::env::temp_dir().join(format!("gitlsd-home-{}-{index}", std::process::id()));
+    let config_directory = home.join(".config/gitlsd");
     fs::create_dir_all(&config_directory).unwrap();
     fs::write(
         config_directory.join("config"),
@@ -218,8 +217,7 @@ fn discovers_default_config_from_absolute_xdg_home() {
 
     let output = command()
         .args(["--debug", "x"])
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("HOME", "/unused")
+        .env("HOME", &home)
         .current_dir(fixture())
         .output()
         .unwrap();

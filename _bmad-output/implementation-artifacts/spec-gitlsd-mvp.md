@@ -65,7 +65,7 @@ It must intentionally omit module inventories, concrete type names, parsing algo
 
 **Execution:**
 - [x] `Cargo.toml`, `src/main.rs`, `src/lib.rs`, `src/cli.rs` -- establish executable/library boundary and normal versus debug-build CLI paths.
-- [x] `src/config.rs` -- implement defaults, XDG/home or explicit config discovery, tigrc-like `set log`, `set batch-size`, and `bind` directives with validation.
+- [x] `src/config.rs` -- implement defaults, home or explicit config discovery, tigrc-like `set log`, `set batch-size`, and `bind` directives with validation.
 - [x] `src/git.rs` -- run the configured log argv via Git-compatible pagination arguments, parse one record per commit, and surface process errors.
 - [x] `src/app.rs` -- own screen/input state, selection, lazy fetch, search navigation, commands, and configurable action dispatch.
 - [x] `src/ui.rs`, `src/debug.rs` -- provide interactive Ratatui rendering and a stable plain-text snapshot of the same state machine in debug builds.
@@ -92,7 +92,7 @@ It must intentionally omit module inventories, concrete type names, parsing algo
 | BH-01 | medium | Confirmed that Ctrl-C was consumed by text-entry modes; patched by resolving configured control-key quit before mode input and covered by an app test. |
 | BH-02 | medium | Confirmed that quoted empty arguments disappeared; patched with explicit token-start tracking and covered by configuration parsing tests. |
 | BH-03 | medium | Confirmed that all standalone `=` tokens were removed; patched so only the optional grammar separator is removed, with literal-key and argv coverage. |
-| BH-04 | medium | Confirmed that empty or relative XDG homes produced an invalid config location; patched to require a non-empty absolute path and fall back to HOME. |
+| BH-04 | medium | Confirmed that invalid environment values produced an invalid config location; patched to fall back to HOME. |
 | BH-05 | medium | Confirmed that `Path::exists` hid non-not-found filesystem failures; patched to read directly and suppress only `NotFound`, with regression coverage. |
 | BH-06 | medium | Confirmed that output-expanding Git options broke record parsing; patched at the Git boundary to enforce machine output and covered against configured graph/patch/stat options. |
 | BH-07 | low | Confirmed that the unit separator could collide with repository text; patched with NUL-framed fields and records. |
@@ -106,7 +106,7 @@ It must intentionally omit module inventories, concrete type names, parsing algo
 | EC-02 | low | Confirmed that Alt-modified characters could trigger ordinary bindings; patched by rejecting unsupported Alt combinations and covered in the key-translation table. |
 | EC-03 | medium | Same literal-equals defect as BH-03; patched and verified by parser and binding tests. |
 | EC-04 | medium | Same quoted-empty-argument defect as BH-02; patched and verified by parser tests. |
-| EC-05 | medium | Same XDG resolution defect as BH-04; patched and verified by unit and process-level discovery tests. |
+| EC-05 | medium | Same environment resolution defect as BH-04; patched and verified by unit and process-level discovery tests. |
 | EC-06 | medium | Same semicolon debug-input defect as BH-11; patched and verified end to end. |
 | EC-07 | medium | Same configured output-option defect as BH-06; patched and verified against the real fixture. |
 | EC-08 | low | Same delimiter collision as BH-07; patched with NUL framing and parser coverage. |
@@ -118,7 +118,7 @@ It must intentionally omit module inventories, concrete type names, parsing algo
 | VG-01 | medium | Duplicate suppression had no overlapping-page test; patched with a source that repeats a commit across adjacent pages. |
 | VG-02 | medium | Custom bindings were parsed and displayed but not dispatched in tests; patched with fixture-backed literal and named-key behavior checks. |
 | VG-03 | medium | Configured Git argv was not observed at the process boundary; patched with a fixture filter that changes the selected history. |
-| VG-04 | medium | Default configuration discovery had no process-level coverage; patched with an isolated absolute XDG home and no explicit config argument. |
+| VG-04 | medium | Default configuration discovery had no process-level coverage; patched with an isolated home and no explicit config argument. |
 | VG-05 | medium | Physical-key translation covered only Ctrl-C and Enter; patched with a table covering every supported key and unsupported modifiers/codes. |
 | VG-06 | medium | Ratatui output was not verified; patched with TestBackend assertions for selected log rows, status, help, and scrolling. |
 | VG-07 | false | A real PTY launch/quit smoke check ran during review and exited zero while emitting alternate-screen leave and cursor-show restoration sequences. |
