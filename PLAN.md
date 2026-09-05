@@ -16,7 +16,7 @@
 (L) - large; (M) - medium; (S) - small.
 
 - [x] (L) Support text selection by mouse. User should be able to select (and copy from terminal) any text shown in views. Make output text based.
-- [ ] (L) Search: highlight search matches.
+- [x] (L) Search: highlight search matches.
 - [ ] (M) Commands: be able to call commands in any mode/view. Pressing `:` should work everywhere, not only in log.
 - [ ] (S) Highlight view which is in focus.
 - [ ] (S) Adjust automatic vertical/horizontal tab split (used for preview).

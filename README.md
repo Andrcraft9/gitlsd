@@ -11,7 +11,7 @@
 | Page Down, Page Up | Move ten rows |
 | Right, Left | Scroll the active log, preview, or help pane horizontally |
 | Home, End | Jump to the horizontal beginning or end of the active pane |
-| `/` | Enter a case-insensitive search |
+| `/` | Enter a case-insensitive search and highlight all matches |
 | `n`, `N` | Repeat search forward or backward, wrapping at the ends |
 | `:` | Enter a command |
 | `?` | Show help and the effective configuration |

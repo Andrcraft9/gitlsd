@@ -485,6 +485,14 @@ impl App {
             InputMode::Command(value) => Some(format!(":{value}")),
         }
     }
+
+    pub fn log_search_query(&self) -> Option<&str> {
+        self.last_search.as_deref()
+    }
+
+    pub fn preview_search_query(&self) -> Option<&str> {
+        self.last_preview_search.as_deref()
+    }
 }
 
 fn matches_record(record: &CommitRecord, query: &str) -> bool {

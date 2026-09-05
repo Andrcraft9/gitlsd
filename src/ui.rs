@@ -130,7 +130,11 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
                 .records
                 .iter()
                 .map(|record| {
-                    ListItem::new(scrolled_line(&record.display, app.log_horizontal_offset))
+                    ListItem::new(scrolled_line(
+                        &record.display,
+                        app.log_horizontal_offset,
+                        app.log_search_query(),
+                    ))
                 })
                 .collect();
             let list = List::new(items)
@@ -156,7 +160,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
                 let preview = app
                     .preview_lines
                     .iter()
-                    .map(|line| styled_line(line))
+                    .map(|line| highlighted_line(line, app.preview_search_query()))
                     .collect::<Vec<_>>();
                 frame.render_widget(
                     Paragraph::new(preview)
@@ -267,11 +271,127 @@ fn styled_line(text: &str) -> Line<'_> {
     Line::from(spans)
 }
 
-fn scrolled_line(text: &str, offset: usize) -> Line<'_> {
-    if offset == 0 {
-        return styled_line(text);
+fn highlighted_line<'a>(text: &'a str, query: Option<&str>) -> Line<'a> {
+    let mut line = styled_line(text);
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return line;
+    };
+    let plain = line.to_string();
+    let ranges = case_insensitive_match_ranges(&plain, query);
+    if ranges.is_empty() {
+        return line;
     }
-    let line = styled_line(text);
+
+    let match_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+        .remove_modifier(Modifier::HIDDEN | Modifier::REVERSED);
+    let mut offset = 0;
+    let mut spans = Vec::new();
+    for span in line.spans.drain(..) {
+        let span_start = offset;
+        let span_end = span_start + span.content.len();
+        let mut boundaries = vec![span_start, span_end];
+        for range in &ranges {
+            if range.start > span_start && range.start < span_end {
+                boundaries.push(range.start);
+            }
+            if range.end > span_start && range.end < span_end {
+                boundaries.push(range.end);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        for window in boundaries.windows(2) {
+            let start = window[0];
+            let end = window[1];
+            let content = &span.content[start - span_start..end - span_start];
+            let style = if ranges
+                .iter()
+                .any(|range| start >= range.start && end <= range.end)
+            {
+                span.style.patch(match_style)
+            } else {
+                span.style
+            };
+            spans.push(Span::styled(content.to_owned(), style));
+        }
+        offset = span_end;
+    }
+    Line::from(spans)
+}
+
+fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut folded = String::new();
+    let mut source_ranges = Vec::new();
+    for (start, character) in text.char_indices() {
+        let source = start..start + character.len_utf8();
+        for folded_character in character.to_lowercase() {
+            let folded_start = folded.len();
+            folded.push(folded_character);
+            source_ranges.push((folded_start..folded.len(), source.clone()));
+        }
+    }
+
+    let mut ranges = folded
+        .char_indices()
+        .filter(|(start, _)| folded[*start..].starts_with(&query))
+        .filter_map(|(start, _)| {
+            let end = start + query.len();
+            let source_start = source_ranges
+                .iter()
+                .find(|(folded, _)| folded.start <= start && start < folded.end)?
+                .1
+                .start;
+            let source_end = source_ranges
+                .iter()
+                .rev()
+                .find(|(folded, _)| folded.start < end && end <= folded.end)?
+                .1
+                .end;
+            Some(source_start..source_end)
+        })
+        .map(|range| {
+            let start = text
+                .grapheme_indices(true)
+                .find(|(start, grapheme)| {
+                    *start <= range.start && range.start < *start + grapheme.len()
+                })
+                .map(|(start, _)| start)
+                .unwrap_or(range.start);
+            let end = text
+                .grapheme_indices(true)
+                .find(|(start, grapheme)| {
+                    *start < range.end && range.end <= *start + grapheme.len()
+                })
+                .map(|(start, grapheme)| start + grapheme.len())
+                .unwrap_or(range.end);
+            start..end
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| range.start);
+    ranges.into_iter().fold(Vec::new(), |mut merged, range| {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+        merged
+    })
+}
+
+fn scrolled_line<'a>(text: &'a str, offset: usize, query: Option<&str>) -> Line<'a> {
+    if offset == 0 {
+        return highlighted_line(text, query);
+    }
+    let line = highlighted_line(text, query);
     let mut remaining = offset;
     let mut spans = Vec::new();
     for span in line.spans {
@@ -470,7 +590,66 @@ mod tests {
 
     #[test]
     fn horizontal_end_skips_a_wide_grapheme_it_cannot_partially_show() {
-        assert_eq!(scrolled_line("界a", 1).to_string(), "a");
+        assert_eq!(scrolled_line("界a", 1, None).to_string(), "a");
+    }
+
+    #[test]
+    fn highlights_every_case_insensitive_match_while_preserving_git_style() {
+        let line = highlighted_line("\x1b[31mFix\x1b[m and fix", Some("fIx"));
+        let highlighted = line
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(Color::Yellow))
+            .collect::<Vec<_>>();
+        assert_eq!(highlighted.len(), 2);
+        assert_eq!(highlighted[0].content, "Fix");
+        assert_eq!(highlighted[0].style.fg, Some(Color::Black));
+        assert_eq!(highlighted[1].content, "fix");
+        assert!(
+            highlighted
+                .iter()
+                .all(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn highlights_matches_crossing_ansi_boundaries_and_survives_scrolling() {
+        let line = scrolled_line(
+            "hidden \x1b[31mse\x1b[32march\x1b[m visible",
+            7,
+            Some("SEARCH"),
+        );
+        assert_eq!(line.to_string(), "search visible");
+        let highlighted = line
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(Color::Yellow))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(highlighted, "search");
+    }
+
+    #[test]
+    fn highlights_overlapping_matches_and_whole_graphemes() {
+        assert_eq!(case_insensitive_match_ranges("aaa", "aa"), vec![0..3]);
+
+        let line = highlighted_line("e\u{301}lan", Some("\u{301}"));
+        let highlighted = line
+            .spans
+            .iter()
+            .find(|span| span.style.bg == Some(Color::Yellow))
+            .expect("highlighted grapheme");
+        assert_eq!(highlighted.content, "e\u{301}");
+    }
+
+    #[test]
+    fn highlight_overrides_visibility_conflicts_from_git_styles() {
+        let line = highlighted_line("\x1b[7;8mhidden\x1b[m", Some("hidden"));
+        let style = line.spans[0].style;
+        assert!(!style.add_modifier.contains(Modifier::HIDDEN));
+        assert!(!style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(style.fg, Some(Color::Black));
+        assert_eq!(style.bg, Some(Color::Yellow));
     }
 
     #[test]
