@@ -46,6 +46,7 @@ Keys are a single character or one of `up`, `down`, `left`, `right`, `home`, `en
 The interactive frontend leaves mouse input to the terminal. Drag-select any currently rendered log, preview, help, status, or input text and use the terminal's ordinary copy operation. Mouse-wheel and touchpad scrolling are likewise terminal-owned; because gitlsd uses the alternate screen, that may not provide normal scrollback. Use the configured keyboard controls to scroll gitlsd panes.
 
 The selected commit preview is visible by default. It runs `git show --stat --patch` with the selected full commit ID appended; `set preview git show ...` customizes that command. Enter focuses the preview, where navigation and search act only on preview text.
+The preview is placed beside the log only when the terminal is sufficiently wide; otherwise it is stacked below the log. The automatic choice accounts for the rectangular shape of terminal cells.
 
 Invalid configuration reports its file, line, and reason.
 

@@ -95,6 +95,16 @@ fn restore_terminal(writer: &mut impl Write) -> io::Result<()> {
     execute!(writer, DisableMouseCapture, LeaveAlternateScreen, Show)
 }
 
+fn preview_layout_direction(content_area: ratatui::layout::Rect) -> Direction {
+    // Terminal cells are typically about twice as tall as they are wide, so
+    // compare an approximate physical aspect ratio instead of raw cell counts.
+    if content_area.width > content_area.height.saturating_mul(2) {
+        Direction::Horizontal
+    } else {
+        Direction::Vertical
+    }
+}
+
 fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -103,13 +113,8 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
     let pane = match app.screen {
         Screen::Help => chunks[0],
         Screen::Log if app.preview_visible => {
-            let direction = if chunks[0].width > chunks[0].height {
-                Direction::Horizontal
-            } else {
-                Direction::Vertical
-            };
             let panes = Layout::default()
-                .direction(direction)
+                .direction(preview_layout_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[0]);
             if app.preview_focused {
@@ -153,13 +158,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
                 Some(app.selected)
             });
             if app.preview_visible {
-                let direction = if chunks[0].width > chunks[0].height {
-                    Direction::Horizontal
-                } else {
-                    Direction::Vertical
-                };
                 let panes = Layout::default()
-                    .direction(direction)
+                    .direction(preview_layout_direction(chunks[0]))
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[0]);
                 frame.render_stateful_widget(list, panes[0], log_state);
@@ -519,6 +519,22 @@ mod tests {
     }
 
     #[test]
+    fn preview_layout_uses_content_area_cell_aspect_ratio() {
+        assert_eq!(
+            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 180, 100)),
+            Direction::Vertical
+        );
+        assert_eq!(
+            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 200, 100)),
+            Direction::Vertical
+        );
+        assert_eq!(
+            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 201, 100)),
+            Direction::Horizontal
+        );
+    }
+
+    #[test]
     fn renders_log_selection_and_status() {
         let mut app = App::new(Config::default());
         app.records.push(CommitRecord {
@@ -669,7 +685,10 @@ mod tests {
         app.preview_focused = true;
         app.preview_horizontal_offset = "prefix-hidden ".len();
         let mut log_state = ListState::default();
-        for (width, height) in [(80, 10), (20, 30)] {
+        for (width, height, direction) in [
+            (80, 10, Direction::Horizontal),
+            (30, 20, Direction::Vertical),
+        ] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| render(frame, &app, &mut log_state))
@@ -679,6 +698,20 @@ mod tests {
             assert!(text.contains("preview content"));
             assert!(!text.contains("prefix-hidden"));
             assert!(text.contains("focused"));
+
+            let panes = Layout::default()
+                .direction(direction)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((panes[1].x + 2, panes[1].y))
+                    .expect("preview title")
+                    .symbol(),
+                "p"
+            );
         }
     }
 
