@@ -143,8 +143,8 @@ fn custom_bindings_dispatch_for_literal_and_named_separator_keys() {
 
 #[test]
 fn horizontal_navigation_is_configurable_and_reported_in_debug_output() {
-    let output = stdout(run("x;x;y", "bind x scroll-right\nbind y scroll-left\n"));
-    assert!(output.contains("log.horizontal-offset=1\n"));
+    let output = stdout(run("x", "bind x scroll-right\nbind y scroll-left\n"));
+    assert!(output.contains("log.horizontal-offset=35\n"), "{output}");
     let help = stdout(run(":;h;e;l;p;enter", "bind x scroll-right\n"));
     assert!(help.contains("binding.x=scroll-right\n"));
 }

@@ -9,7 +9,7 @@
 | `j`, Down | Select next commit |
 | `k`, Up | Select previous commit |
 | Page Down, Page Up | Move ten rows |
-| Right, Left | Scroll the active log, preview, or help pane horizontally |
+| Right, Left | Scroll the active log, preview, or help pane horizontally by half its width |
 | Home, End | Jump to the horizontal beginning or end of the active pane |
 | `/` | Enter a case-insensitive search and highlight all matches |
 | `n`, `N` | Repeat search until `(END)` or `(TOP)` without wraparound |

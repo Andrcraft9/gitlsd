@@ -257,6 +257,7 @@ impl App {
 
     fn scroll_horizontal(&mut self, action: Action) {
         let maximum = self.max_horizontal_offset();
+        let step = (self.horizontal_viewport_width / 2).max(1);
         let offset = if self.preview_focused && self.screen == Screen::Log {
             &mut self.preview_horizontal_offset
         } else if self.screen == Screen::Help {
@@ -267,8 +268,8 @@ impl App {
         *offset = match action {
             Action::ScrollStart => 0,
             Action::ScrollEnd => maximum,
-            Action::ScrollLeft => offset.saturating_sub(1),
-            Action::ScrollRight => offset.saturating_add(1).min(maximum),
+            Action::ScrollLeft => offset.saturating_sub(step),
+            Action::ScrollRight => offset.saturating_add(step).min(maximum),
             _ => *offset,
         };
     }
@@ -722,16 +723,18 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.selected = 1;
-        app.set_horizontal_viewport_width(3);
+        app.set_horizontal_viewport_width(4);
 
         app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.log_horizontal_offset, 2);
         app.dispatch(Action::ScrollRight, &mut history);
         app.dispatch(Action::ScrollLeft, &mut history);
-        assert_eq!(app.log_horizontal_offset, 1);
+        assert_eq!(app.log_horizontal_offset, 2);
         assert_eq!(app.selected, 1);
 
         app.dispatch(Action::Help, &mut history);
         app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.help_horizontal_offset, 2);
         app.dispatch(Action::ScrollLeft, &mut history);
         app.dispatch(Action::ScrollLeft, &mut history);
         assert_eq!(app.help_horizontal_offset, 0);
@@ -741,9 +744,10 @@ mod tests {
         app.handle_key(Key::Enter, &mut history);
         app.preview_lines = vec!["abcdef".into()];
         app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.preview_horizontal_offset, 2);
         app.dispatch(Action::ScrollRight, &mut history);
         app.dispatch(Action::ScrollLeft, &mut history);
-        assert_eq!(app.preview_horizontal_offset, 1);
+        assert_eq!(app.preview_horizontal_offset, 0);
         assert_eq!(app.preview_offset, 0);
         assert_eq!(app.selected, 1);
     }
@@ -781,6 +785,27 @@ mod tests {
         assert_eq!(app.preview_horizontal_offset, 3);
         app.dispatch(Action::ScrollStart, &mut history);
         assert_eq!(app.preview_horizontal_offset, 0);
+    }
+
+    #[test]
+    fn horizontal_scroll_moves_half_the_viewport_width() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "abcdefghijklmnopqrstuvwxyz".into(),
+            }],
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.set_horizontal_viewport_width(10);
+
+        app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.log_horizontal_offset, 5);
+        app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.log_horizontal_offset, 10);
+        app.dispatch(Action::ScrollLeft, &mut history);
+        assert_eq!(app.log_horizontal_offset, 5);
     }
 
     #[test]

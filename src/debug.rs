@@ -10,11 +10,14 @@ use crate::app::{App, Screen};
 use crate::config::Key;
 use crate::git::HistorySource;
 
+const HORIZONTAL_VIEWPORT_WIDTH: usize = 80;
+
 pub fn run_script(
     app: &mut App,
     source: &mut impl HistorySource,
     script: &str,
 ) -> Result<String, String> {
+    app.set_horizontal_viewport_width(HORIZONTAL_VIEWPORT_WIDTH);
     if !script.is_empty() {
         for (index, token) in script.split(';').enumerate() {
             if token.is_empty() {
@@ -154,10 +157,10 @@ mod tests {
         let mut app = App::new(Config::default());
         app.records.push(CommitRecord {
             id: "id".into(),
-            display: "wide enough row".into(),
+            display: "x".repeat(200),
         });
         let output = run_script(&mut app, &mut Empty, "right;right;left").unwrap();
-        assert!(output.contains("log.horizontal-offset=1\n"));
+        assert!(output.contains("log.horizontal-offset=40\n"));
         assert!(output.contains("preview.horizontal-offset=0\n"));
         assert!(output.contains("help.horizontal-offset=0\n"));
     }
@@ -167,10 +170,10 @@ mod tests {
         let mut app = App::new(Config::default());
         app.records.push(CommitRecord {
             id: "id".into(),
-            display: "wide enough row".into(),
+            display: "x".repeat(200),
         });
         let end = run_script(&mut app, &mut Empty, "end").unwrap();
-        assert!(end.contains("log.horizontal-offset=14\n"));
+        assert!(end.contains("log.horizontal-offset=120\n"));
         let start = run_script(&mut app, &mut Empty, "home").unwrap();
         assert!(start.contains("log.horizontal-offset=0\n"));
     }
