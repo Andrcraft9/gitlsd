@@ -24,3 +24,6 @@
 - [ ] (S) Preview/show: add new keys to adjust context size, e.g. `[` and `]` defaults like in `tig`.
 - [ ] (S) Don't print "Loaded commits N".
 - [ ] (M) Simplify case_insensitive_match_ranges() and possibly other places assuming that we only support Latin alphabet.
+- [ ] (S) Don't show "Focus the show diff to search". Always search through diff.
+- [ ] (S) There is no returning back from search state. Once searched, you always see highlighted search results. ESC does't reset search.
+- [ ] (S) In show mode: split file explorer and diff tabs with 1:2 ratio (diff should be wider).

@@ -5,7 +5,7 @@
      LogState, HelpState, and ShowState structures, ideally owned by an enum representing the
      active screen.
 
-  2. (Refactoring, High) Most application state is publicly mutable.
+  2. (DONE) (Refactoring, High) Most application state is publicly mutable.
      The public fields at src/app.rs:36 let UI and debug code depend directly on implementation
      details and bypass invariants. Make fields private and expose intent methods plus read-only
      view accessors.
@@ -59,8 +59,3 @@
      Repeated calls to safe_text(..., false) across app, UI, and debug indicate that safety and
      styling guarantees are implicit. A small GitText/SafeText type with styled and plain views
      would centralize the trust boundary and reduce repeated sanitization.
-
-  13. (Function, High) Don't show "Focus the show diff to search". Always search through diff.
-
-  14. (Function, High) There is no returning back from search state. Once searched, you always see
-      highlighted search results. ESC does't reset search.
