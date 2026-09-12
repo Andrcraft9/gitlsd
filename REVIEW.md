@@ -45,17 +45,17 @@
      wrapping, matching, and status handling. Extract a line-search helper returning a result
      such as Found, Boundary, or NoMatch; keep paginated log search separate.
 
-  10. Git command configuration is weakly typed and execution is duplicated.
+  10. (?) Git command configuration is weakly typed and execution is duplicated.
      GitHistory::new (src/git.rs:57) accepts four positional Vec<String> values, while run (src/
      git.rs:73) and run_show (src/git.rs:96) repeat process setup. Introduce a named GitCommands
      structure and one executor that attaches operation context to errors.
 
-  11. Unsupported source capabilities appear as valid empty content.
+  11. (?) Unsupported source capabilities appear as valid empty content.
      Default implementations in HistorySource (src/git.rs:37) return empty preview and show
      data. Now that both are core features, require implementations to provide them or return an
      explicit unsupported-operation error.
 
-  12. Sanitized terminal text is represented as an ordinary String.
+  12. (?) Sanitized terminal text is represented as an ordinary String.
      Repeated calls to safe_text(..., false) across app, UI, and debug indicate that safety and
      styling guarantees are implicit. A small GitText/SafeText type with styled and plain views
      would centralize the trust boundary and reduce repeated sanitization.
