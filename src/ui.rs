@@ -32,7 +32,7 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
     let mut session = TerminalSession::start()?;
     let mut log_state = ListState::default();
     let mut show_state = ListState::default();
-    while app.running {
+    while app.is_running() {
         session
             .terminal
             .draw(|frame| render_with_states(frame, app, &mut log_state, &mut show_state))?;
@@ -111,14 +111,14 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
-    let pane = match &app.screen {
+    let pane = match app.screen() {
         Screen::Help(_) => chunks[0],
-        Screen::Log if app.preview_visible => {
+        Screen::Log if app.log_state().preview_visible() => {
             let panes = Layout::default()
                 .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[0]);
-            if app.preview_focused {
+            if app.log_state().preview_focused() {
                 panes[1]
             } else {
                 panes[0]
@@ -130,20 +130,17 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
                 .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[0]);
-            match show.show_focus {
+            match show.focus() {
                 ShowFocus::Explorer => panes[0],
                 ShowFocus::Diff => panes[1],
             }
         }
     };
     let marker_width = usize::from(
-        (matches!(app.screen, Screen::Log) && !app.preview_focused)
+        (matches!(app.screen(), Screen::Log) && !app.log_state().preview_focused())
             || matches!(
-                app.screen,
-                Screen::Show(ShowState {
-                    show_focus: ShowFocus::Explorer,
-                    ..
-                })
+                app.screen(),
+                Screen::Show(show) if show.focus() == ShowFocus::Explorer
             ),
     ) * 2;
     usize::from(pane.width.saturating_sub(2)).saturating_sub(marker_width)
@@ -166,15 +163,16 @@ fn render_with_states(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
-    match &app.screen {
+    match app.screen() {
         Screen::Log => {
-            let items: Vec<_> = app
-                .records
+            let log = app.log_state();
+            let items: Vec<_> = log
+                .records()
                 .iter()
                 .map(|record| {
                     ListItem::new(scrolled_line(
                         &record.display,
-                        app.log_horizontal_offset,
+                        log.log_horizontal_offset(),
                         app.log_search_query(),
                     ))
                 })
@@ -183,31 +181,34 @@ fn render_with_states(
                 .block(Block::default().title(" gitlsd log ").borders(Borders::ALL))
                 .highlight_symbol("> ")
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            log_state.select(if app.records.is_empty() {
+            log_state.select(if log.records().is_empty() {
                 None
             } else {
-                Some(app.selected)
+                Some(log.selected())
             });
-            if app.preview_visible {
+            if log.preview_visible() {
                 let panes = Layout::default()
                     .direction(content_split_direction(chunks[0]))
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[0]);
                 frame.render_stateful_widget(list, panes[0], log_state);
                 let preview = app
-                    .preview_lines
+                    .log_state()
+                    .preview_lines()
                     .iter()
                     .map(|line| highlighted_line(line, app.preview_search_query()))
                     .collect::<Vec<_>>();
                 frame.render_widget(
                     Paragraph::new(preview)
                         .scroll((
-                            app.preview_offset.try_into().unwrap_or(u16::MAX),
-                            app.preview_horizontal_offset.try_into().unwrap_or(u16::MAX),
+                            log.preview_offset().try_into().unwrap_or(u16::MAX),
+                            log.preview_horizontal_offset()
+                                .try_into()
+                                .unwrap_or(u16::MAX),
                         ))
                         .block(
                             Block::default()
-                                .title(if app.preview_focused {
+                                .title(if log.preview_focused() {
                                     " preview (focused) "
                                 } else {
                                     " preview "
@@ -221,12 +222,12 @@ fn render_with_states(
             }
         }
         Screen::Help(help) => {
-            let text = app.config.help_lines().join("\n");
+            let text = app.help_lines().join("\n");
             frame.render_widget(
                 Paragraph::new(text)
                     .scroll((
-                        help.offset.try_into().unwrap_or(u16::MAX),
-                        help.horizontal_offset.try_into().unwrap_or(u16::MAX),
+                        help.offset().try_into().unwrap_or(u16::MAX),
+                        help.horizontal_offset().try_into().unwrap_or(u16::MAX),
                     ))
                     .block(Block::default().title(" help ").borders(Borders::ALL)),
                 chunks[0],
@@ -237,7 +238,7 @@ fn render_with_states(
         }
     }
 
-    let status = app.input_label().unwrap_or_else(|| app.status.clone());
+    let status = app.input_label().unwrap_or_else(|| app.status().to_owned());
     frame.render_widget(Paragraph::new(status), chunks[1]);
 }
 
@@ -255,7 +256,7 @@ fn render_show(
 
     let explorer = panes[0];
     let metadata_height = show
-        .show_metadata
+        .metadata()
         .len()
         .saturating_add(2)
         .min(usize::from(explorer.height.saturating_sub(1)))
@@ -267,7 +268,7 @@ fn render_show(
         .split(explorer);
 
     let metadata = show
-        .show_metadata
+        .metadata()
         .iter()
         .map(|line| styled_line(line))
         .collect::<Vec<_>>();
@@ -275,7 +276,7 @@ fn render_show(
         Paragraph::new(metadata)
             .scroll((
                 0,
-                show.show_explorer_horizontal_offset
+                show.explorer_horizontal_offset()
                     .try_into()
                     .unwrap_or(u16::MAX),
             ))
@@ -284,21 +285,21 @@ fn render_show(
     );
 
     let files = show
-        .show_files
+        .files()
         .iter()
         .map(|file| {
             ListItem::new(scrolled_line(
                 &file.display,
-                show.show_explorer_horizontal_offset,
+                show.explorer_horizontal_offset(),
                 None,
             ))
         })
         .collect::<Vec<_>>();
-    show_state.select(show.show_selected);
+    show_state.select(show.selected());
     let files = List::new(files)
         .block(
             Block::default()
-                .title(if show.show_focus == ShowFocus::Explorer {
+                .title(if show.focus() == ShowFocus::Explorer {
                     " files (focused) "
                 } else {
                     " files "
@@ -310,21 +311,19 @@ fn render_show(
     frame.render_stateful_widget(files, explorer_chunks[1], show_state);
 
     let diff = show
-        .show_diff_lines
+        .diff_lines()
         .iter()
         .map(|line| highlighted_line(line, search_query))
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(diff)
             .scroll((
-                show.show_diff_offset.try_into().unwrap_or(u16::MAX),
-                show.show_diff_horizontal_offset
-                    .try_into()
-                    .unwrap_or(u16::MAX),
+                show.diff_offset().try_into().unwrap_or(u16::MAX),
+                show.diff_horizontal_offset().try_into().unwrap_or(u16::MAX),
             ))
             .block(
                 Block::default()
-                    .title(if show.show_focus == ShowFocus::Diff {
+                    .title(if show.focus() == ShowFocus::Diff {
                         " diff (focused) "
                     } else {
                         " diff "
@@ -577,10 +576,63 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
 mod tests {
     use ratatui::backend::TestBackend;
 
-    use crate::config::{Action, Config};
-    use crate::git::{ChangedFile, CommitRecord, GitError};
+    use crate::config::{Action, Config, Key};
+    use crate::git::{ChangedFile, CommitRecord, GitError, HistorySource, ShowData};
 
     use super::*;
+
+    struct FixtureHistory {
+        records: Vec<CommitRecord>,
+        preview: Vec<String>,
+        show: ShowData,
+    }
+
+    impl HistorySource for FixtureHistory {
+        fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
+            Ok(self
+                .records
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn load_preview(&mut self, _id: &str) -> Result<Vec<String>, GitError> {
+            Ok(self.preview.clone())
+        }
+
+        fn load_show(&mut self, _id: &str) -> Result<ShowData, GitError> {
+            Ok(self.show.clone())
+        }
+    }
+
+    fn app_with_history(
+        records: Vec<CommitRecord>,
+        preview: Vec<String>,
+        show: ShowData,
+    ) -> (App, FixtureHistory) {
+        let mut app = App::new(Config::default());
+        let mut history = FixtureHistory {
+            records,
+            preview,
+            show,
+        };
+        app.initialize(&mut history).unwrap();
+        (app, history)
+    }
+
+    fn show_data() -> ShowData {
+        ShowData {
+            metadata: vec!["commit full-id".into(), "Author: Test".into()],
+            files: vec![ChangedFile {
+                display: "M src/lib.rs".into(),
+                old_path: Some("src/lib.rs".into()),
+                new_path: Some("src/lib.rs".into()),
+            }],
+            diff: vec!["diff --git a/src/lib.rs b/src/lib.rs".into()],
+        }
+    }
 
     #[test]
     fn renders_git_sgr_as_styles_without_escape_text() {
@@ -664,8 +716,15 @@ mod tests {
 
     #[test]
     fn active_width_tracks_each_show_pane_and_explorer_marker() {
-        let mut app = App::new(Config::default());
-        app.screen = Screen::Show(ShowState::default());
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            Vec::new(),
+            show_data(),
+        );
+        app.dispatch(Action::ShowMode, &mut history);
         for area in [
             ratatui::layout::Rect::new(0, 0, 201, 101),
             ratatui::layout::Rect::new(0, 0, 40, 101),
@@ -679,25 +738,27 @@ mod tests {
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(content);
 
-            app.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
             let explorer_width = usize::from(panes[0].width.saturating_sub(2)).saturating_sub(2);
             assert_eq!(active_content_width(area, &app), explorer_width);
 
-            app.screen.show_mut().unwrap().show_focus = ShowFocus::Diff;
+            app.handle_key(Key::Enter, &mut history);
             let diff_width = usize::from(panes[1].width.saturating_sub(2));
             assert_eq!(active_content_width(area, &app), diff_width);
+            app.handle_key(Key::Escape, &mut history);
         }
     }
 
     #[test]
     fn renders_log_selection_and_status() {
-        let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "full-id".into(),
-            display: "abc1234 2026-09-05 Author Rendered subject".into(),
-        });
-        app.status = "Ready".into();
-        app.preview_visible = false;
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "abc1234 2026-09-05 Author Rendered subject".into(),
+            }],
+            Vec::new(),
+            ShowData::default(),
+        );
+        app.dispatch(Action::TogglePreview, &mut history);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
@@ -707,7 +768,7 @@ mod tests {
         assert!(text.contains("gitlsd log"));
         assert!(text.contains("abc1234 2026-09-05 Author"));
         assert!(text.contains("Rendered subject"));
-        assert!(text.contains("Ready"));
+        assert!(text.contains("Loaded 1 commits"));
         assert!(
             terminal
                 .backend()
@@ -722,13 +783,18 @@ mod tests {
 
     #[test]
     fn renders_log_at_horizontal_offset() {
-        let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "full-id".into(),
-            display: "prefix-hidden visible-content".into(),
-        });
-        app.preview_visible = false;
-        app.log_horizontal_offset = "prefix-hidden ".len();
+        let line = "prefix-hidden visible-content";
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: line.into(),
+            }],
+            Vec::new(),
+            ShowData::default(),
+        );
+        app.dispatch(Action::TogglePreview, &mut history);
+        app.set_horizontal_viewport_width("visible-content".len());
+        app.dispatch(Action::ScrollEnd, &mut history);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
         terminal
@@ -741,13 +807,18 @@ mod tests {
 
     #[test]
     fn renders_log_at_grapheme_display_width_and_preserves_ansi_selected_style() {
-        let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "full-id".into(),
-            display: "\x1b[31m界e\u{301} visible\x1b[m".into(),
-        });
-        app.preview_visible = false;
-        app.log_horizontal_offset = 3;
+        let line = "\x1b[31m界e\u{301} visible\x1b[m";
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: line.into(),
+            }],
+            Vec::new(),
+            ShowData::default(),
+        );
+        app.dispatch(Action::TogglePreview, &mut history);
+        app.set_horizontal_viewport_width(8);
+        app.dispatch(Action::ScrollEnd, &mut history);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
         terminal
@@ -831,14 +902,17 @@ mod tests {
 
     #[test]
     fn renders_preview_in_both_orientations_and_marks_focus() {
-        let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "id".into(),
-            display: "log row".into(),
-        });
-        app.preview_lines = vec!["prefix-hidden preview content".into()];
-        app.preview_focused = true;
-        app.preview_horizontal_offset = "prefix-hidden ".len();
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "id".into(),
+                display: "log row".into(),
+            }],
+            vec!["prefix-hidden preview content".into()],
+            ShowData::default(),
+        );
+        app.handle_key(Key::Enter, &mut history);
+        app.set_horizontal_viewport_width("preview content".len());
+        app.dispatch(Action::ScrollEnd, &mut history);
         let mut log_state = ListState::default();
         for (width, height, direction) in [
             (80, 10, Direction::Horizontal),
@@ -872,17 +946,17 @@ mod tests {
 
     #[test]
     fn renders_show_explorer_and_diff_in_both_orientations() {
-        let mut app = App::new(Config::default());
-        let mut show = ShowState::default();
-        show.show_metadata = vec!["commit full-id".into(), "Author: Test".into()];
-        show.show_files = vec![ChangedFile {
-            display: "M src/lib.rs".into(),
-            old_path: Some("src/lib.rs".into()),
-            new_path: Some("src/lib.rs".into()),
-        }];
-        show.show_selected = Some(0);
-        show.show_diff_lines = vec!["diff --git a/src/lib.rs b/src/lib.rs".into()];
-        app.screen = Screen::Show(show);
+        let mut show = show_data();
+        show.diff = vec!["\x1b[31mdiff --git a/src/lib.rs b/src/lib.rs\x1b[m".into()];
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            Vec::new(),
+            show,
+        );
+        app.dispatch(Action::ShowMode, &mut history);
         let mut log_state = ListState::default();
         for (width, height, direction) in [
             (80, 10, Direction::Horizontal),
@@ -924,9 +998,7 @@ mod tests {
             }));
         }
 
-        let show = app.screen.show_mut().unwrap();
-        show.show_focus = ShowFocus::Diff;
-        show.show_diff_lines = vec!["\x1b[31mcolored diff\x1b[m".into()];
+        app.handle_key(Key::Enter, &mut history);
         let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
         terminal
             .draw(|frame| render(frame, &app, &mut log_state))
@@ -953,11 +1025,19 @@ mod tests {
 
     #[test]
     fn renders_scrolled_show_metadata() {
-        let mut app = App::new(Config::default());
-        let mut show = ShowState::default();
-        show.show_metadata = vec!["prefix-hidden metadata".into()];
-        show.show_explorer_horizontal_offset = "prefix-hidden ".len();
-        app.screen = Screen::Show(show);
+        let mut show = show_data();
+        show.metadata = vec!["prefix-hidden metadata".into()];
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            Vec::new(),
+            show,
+        );
+        app.dispatch(Action::ShowMode, &mut history);
+        app.set_horizontal_viewport_width("metadata".len());
+        app.dispatch(Action::ScrollEnd, &mut history);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal
@@ -970,24 +1050,19 @@ mod tests {
 
     #[test]
     fn renders_scrolled_help_in_small_terminal_without_moving_log_selection() {
-        struct Empty;
-
-        impl HistorySource for Empty {
-            fn load(
-                &mut self,
-                _offset: usize,
-                _limit: usize,
-            ) -> Result<Vec<CommitRecord>, GitError> {
-                Ok(Vec::new())
-            }
+        let records = (0..5)
+            .map(|index| CommitRecord {
+                id: index.to_string(),
+                display: format!("row {index}"),
+            })
+            .collect();
+        let (mut app, mut history) = app_with_history(records, Vec::new(), ShowData::default());
+        for _ in 0..4 {
+            app.dispatch(Action::MoveDown, &mut history);
         }
-
-        let mut app = App::new(Config::default());
-        app.selected = 4;
-        let mut history = Empty;
         app.dispatch(Action::Help, &mut history);
         app.dispatch(Action::PageDown, &mut history);
-        assert_eq!(app.selected, 4);
+        assert_eq!(app.log_state().selected(), 4);
 
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
@@ -1003,22 +1078,12 @@ mod tests {
 
     #[test]
     fn renders_help_at_horizontal_offset() {
-        struct Empty;
-
-        impl HistorySource for Empty {
-            fn load(
-                &mut self,
-                _offset: usize,
-                _limit: usize,
-            ) -> Result<Vec<CommitRecord>, GitError> {
-                Ok(Vec::new())
-            }
-        }
-
-        let mut app = App::new(Config::default());
-        let mut history = Empty;
+        let (mut app, mut history) = app_with_history(Vec::new(), Vec::new(), ShowData::default());
         app.dispatch(Action::Help, &mut history);
-        app.screen.help_mut().unwrap().horizontal_offset = "setting.".len();
+        app.set_horizontal_viewport_width(2);
+        for _ in 0.."setting.".len() {
+            app.dispatch(Action::ScrollRight, &mut history);
+        }
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal
@@ -1031,28 +1096,16 @@ mod tests {
 
     #[test]
     fn keeps_log_cursor_in_view_while_reversing_direction() {
-        struct Empty;
-
-        impl HistorySource for Empty {
-            fn load(
-                &mut self,
-                _offset: usize,
-                _limit: usize,
-            ) -> Result<Vec<CommitRecord>, GitError> {
-                Ok(Vec::new())
-            }
-        }
-
-        let mut app = App::new(Config::default());
-        app.records = (0..24)
+        let records: Vec<CommitRecord> = (0..24)
             .map(|index| CommitRecord {
                 id: index.to_string(),
                 display: format!("row {index}"),
             })
             .collect();
-        let mut history = Empty;
 
         for (width, height) in [(80, 10), (20, 30)] {
+            let (mut app, mut history) =
+                app_with_history(records.clone(), Vec::new(), ShowData::default());
             let mut log_state = ListState::default();
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for _ in 0..18 {
@@ -1070,7 +1123,7 @@ mod tests {
                 .unwrap();
             assert_eq!(log_state.offset(), bottom_offset);
 
-            while app.selected > log_state.offset() {
+            while app.log_state().selected() > log_state.offset() {
                 app.dispatch(Action::MoveUp, &mut history);
                 terminal
                     .draw(|frame| render(frame, &app, &mut log_state))
@@ -1082,8 +1135,6 @@ mod tests {
                 .draw(|frame| render(frame, &app, &mut log_state))
                 .unwrap();
             assert_eq!(log_state.offset(), top_offset - 1);
-
-            app.selected = 0;
         }
     }
 

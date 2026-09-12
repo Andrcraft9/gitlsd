@@ -40,7 +40,8 @@ flowchart TD
   screen. Persistent log and preview state survives screen transitions, while
   the active-screen enum exclusively owns ephemeral help or show state. Show
   navigation never mutates the log selection, and diff scrolling keeps the
-  explorer selection synchronized with the current patch section.
+  explorer selection synchronized with the current patch section. Its state
+  is private; frontends drive intent methods and consume read-only views.
 - `git` provides repository data through the Git CLI. Its `ShowData` result
   keeps metadata, fixed name-status rows, and the complete configured diff
   together so the app cannot render mismatched partial show loads.

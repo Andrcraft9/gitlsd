@@ -28,7 +28,7 @@ pub fn run_script(
                 .parse()
                 .map_err(|reason| format!("script key {}: {reason}", index + 1))?;
             app.handle_key(key, source);
-            if !app.running {
+            if !app.is_running() {
                 break;
             }
         }
@@ -38,41 +38,42 @@ pub fn run_script(
 
 pub fn snapshot(app: &App) -> String {
     let mut output = String::new();
-    let screen = match &app.screen {
+    let screen = match app.screen() {
         Screen::Log => "log",
         Screen::Help(_) => "help",
         Screen::Show(_) => "show",
     };
     writeln!(output, "screen={screen}").unwrap();
-    writeln!(output, "running={}", app.running).unwrap();
-    writeln!(output, "loaded={}", app.records.len()).unwrap();
-    writeln!(output, "selected={}", app.selected).unwrap();
-    writeln!(output, "preview.visible={}", app.preview_visible).unwrap();
-    writeln!(output, "preview.focused={}", app.preview_focused).unwrap();
-    writeln!(output, "preview.offset={}", app.preview_offset).unwrap();
+    let log = app.log_state();
+    writeln!(output, "running={}", app.is_running()).unwrap();
+    writeln!(output, "loaded={}", log.records().len()).unwrap();
+    writeln!(output, "selected={}", log.selected()).unwrap();
+    writeln!(output, "preview.visible={}", log.preview_visible()).unwrap();
+    writeln!(output, "preview.focused={}", log.preview_focused()).unwrap();
+    writeln!(output, "preview.offset={}", log.preview_offset()).unwrap();
     writeln!(
         output,
         "log.horizontal-offset={}",
-        app.log_horizontal_offset
+        log.log_horizontal_offset()
     )
     .unwrap();
     writeln!(
         output,
         "preview.horizontal-offset={}",
-        app.preview_horizontal_offset
+        log.preview_horizontal_offset()
     )
     .unwrap();
     writeln!(
         output,
         "help.horizontal-offset={}",
-        match &app.screen {
-            Screen::Help(help) => help.horizontal_offset,
+        match app.screen() {
+            Screen::Help(help) => help.horizontal_offset(),
             _ => 0,
         }
     )
     .unwrap();
-    if let Screen::Show(show) = &app.screen {
-        let focus = match show.show_focus {
+    if let Screen::Show(show) = app.screen() {
+        let focus = match show.focus() {
             ShowFocus::Explorer => "explorer",
             ShowFocus::Diff => "diff",
         };
@@ -80,22 +81,22 @@ pub fn snapshot(app: &App) -> String {
         writeln!(
             output,
             "show.selected={}",
-            show.show_selected
+            show.selected()
                 .map_or_else(String::new, |selected| selected.to_string())
         )
         .unwrap();
-        writeln!(output, "show.explorer.offset={}", show.show_explorer_offset).unwrap();
+        writeln!(output, "show.explorer.offset={}", show.explorer_offset()).unwrap();
         writeln!(
             output,
             "show.explorer.horizontal-offset={}",
-            show.show_explorer_horizontal_offset
+            show.explorer_horizontal_offset()
         )
         .unwrap();
-        writeln!(output, "show.diff.offset={}", show.show_diff_offset).unwrap();
+        writeln!(output, "show.diff.offset={}", show.diff_offset()).unwrap();
         writeln!(
             output,
             "show.diff.horizontal-offset={}",
-            show.show_diff_horizontal_offset
+            show.diff_horizontal_offset()
         )
         .unwrap();
     }
@@ -111,20 +112,20 @@ pub fn snapshot(app: &App) -> String {
         writeln!(output, "commit=").unwrap();
         writeln!(output, "display=").unwrap();
     }
-    writeln!(output, "status={}", app.status.replace('\n', " ")).unwrap();
-    if matches!(app.screen, Screen::Help(_)) {
+    writeln!(output, "status={}", app.status().replace('\n', " ")).unwrap();
+    if matches!(app.screen(), Screen::Help(_)) {
         writeln!(output, "help:").unwrap();
-        for line in app.config.help_lines() {
+        for line in app.help_lines() {
             writeln!(output, "  {line}").unwrap();
         }
-    } else if let Screen::Show(show) = &app.screen {
+    } else if let Screen::Show(show) = app.screen() {
         writeln!(output, "show.metadata:").unwrap();
-        for line in &show.show_metadata {
+        for line in show.metadata() {
             writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
         writeln!(output, "show.files:").unwrap();
-        for (index, file) in show.show_files.iter().enumerate() {
-            let marker = if show.show_selected == Some(index) {
+        for (index, file) in show.files().iter().enumerate() {
+            let marker = if show.selected() == Some(index) {
                 '>'
             } else {
                 ' '
@@ -137,19 +138,19 @@ pub fn snapshot(app: &App) -> String {
             .unwrap();
         }
         writeln!(output, "show.diff:").unwrap();
-        for line in &show.show_diff_lines {
+        for line in show.diff_lines() {
             writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
     } else {
-        if app.preview_visible {
+        if log.preview_visible() {
             writeln!(output, "preview:").unwrap();
-            for line in &app.preview_lines {
+            for line in log.preview_lines() {
                 writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
             }
         }
         writeln!(output, "rows:").unwrap();
-        for (index, record) in app.records.iter().enumerate() {
-            let marker = if index == app.selected { '>' } else { ' ' };
+        for (index, record) in log.records().iter().enumerate() {
+            let marker = if index == log.selected() { '>' } else { ' ' };
             writeln!(
                 output,
                 "{marker} {index} {}",
@@ -164,7 +165,7 @@ pub fn snapshot(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
-    use crate::git::{CommitRecord, GitError};
+    use crate::git::{CommitRecord, GitError, HistorySource};
 
     use super::*;
 
@@ -173,6 +174,27 @@ mod tests {
     impl HistorySource for Empty {
         fn load(&mut self, _offset: usize, _limit: usize) -> Result<Vec<CommitRecord>, GitError> {
             Ok(Vec::new())
+        }
+    }
+
+    struct Fixture {
+        records: Vec<CommitRecord>,
+        preview: Vec<String>,
+    }
+
+    impl HistorySource for Fixture {
+        fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
+            Ok(self
+                .records
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn load_preview(&mut self, _id: &str) -> Result<Vec<String>, GitError> {
+            Ok(self.preview.clone())
         }
     }
 
@@ -198,9 +220,16 @@ mod tests {
     #[test]
     fn preview_snapshot_strips_unsafe_controls_and_sgr() {
         let mut app = App::new(Config::default());
-        app.preview_lines = vec!["\x1b[31mred\x1b[m\x1b[2J".into()];
+        let mut history = Fixture {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "row".into(),
+            }],
+            preview: vec!["\x1b[31mred\x1b[m\x1b[2J".into()],
+        };
+        app.initialize(&mut history).unwrap();
         assert_eq!(
-            crate::git::safe_text(&app.preview_lines[0], true),
+            crate::git::safe_text(&app.log_state().preview_lines()[0], true),
             "\x1b[31mred\x1b[m�[2J"
         );
         let output = snapshot(&app);
@@ -211,11 +240,15 @@ mod tests {
     #[test]
     fn scripted_horizontal_navigation_exposes_view_offsets() {
         let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "id".into(),
-            display: "x".repeat(200),
-        });
-        let output = run_script(&mut app, &mut Empty, "right;right;left").unwrap();
+        let mut history = Fixture {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "x".repeat(200),
+            }],
+            preview: Vec::new(),
+        };
+        app.initialize(&mut history).unwrap();
+        let output = run_script(&mut app, &mut history, "right;right;left").unwrap();
         assert!(output.contains("log.horizontal-offset=40\n"));
         assert!(output.contains("preview.horizontal-offset=0\n"));
         assert!(output.contains("help.horizontal-offset=0\n"));
@@ -224,13 +257,17 @@ mod tests {
     #[test]
     fn scripted_home_and_end_jump_horizontal_offsets() {
         let mut app = App::new(Config::default());
-        app.records.push(CommitRecord {
-            id: "id".into(),
-            display: "x".repeat(200),
-        });
-        let end = run_script(&mut app, &mut Empty, "end").unwrap();
+        let mut history = Fixture {
+            records: vec![CommitRecord {
+                id: "id".into(),
+                display: "x".repeat(200),
+            }],
+            preview: Vec::new(),
+        };
+        app.initialize(&mut history).unwrap();
+        let end = run_script(&mut app, &mut history, "end").unwrap();
         assert!(end.contains("log.horizontal-offset=120\n"));
-        let start = run_script(&mut app, &mut Empty, "home").unwrap();
+        let start = run_script(&mut app, &mut history, "home").unwrap();
         assert!(start.contains("log.horizontal-offset=0\n"));
     }
 }
