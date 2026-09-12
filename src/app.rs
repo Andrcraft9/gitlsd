@@ -3,8 +3,12 @@
 //! [`App`] owns persistent log state plus enum-scoped help and show state,
 //! input modes, commands, and shutdown intent. It works through
 //! [`HistorySource`] and has no dependency on terminal libraries or concrete
-//! process execution. Frontends drive it through intent methods and consume
-//! read-only state accessors.
+//! process execution.
+//!
+//! Frontends drive it through intent methods and consume read-only state accessors.
+//!
+//! Action routing is delegated to the focused preview, show, or help screen before
+//! falling back to log/global actions.
 
 use std::collections::HashSet;
 
@@ -332,153 +336,161 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
-        if self.log.preview_focused && matches!(self.screen, Screen::Log) {
-            match action {
-                Action::MoveDown => {
-                    self.log.preview_offset = (self.log.preview_offset + 1)
-                        .min(self.log.preview_lines.len().saturating_sub(1))
-                }
-                Action::MoveUp => {
-                    self.log.preview_offset = self.log.preview_offset.saturating_sub(1)
-                }
-                Action::PageDown => {
-                    self.log.preview_offset = (self.log.preview_offset + 10)
-                        .min(self.log.preview_lines.len().saturating_sub(1))
-                }
-                Action::PageUp => {
-                    self.log.preview_offset = self.log.preview_offset.saturating_sub(10)
-                }
-                Action::ScrollRight => self.scroll_horizontal(action),
-                Action::ScrollLeft => self.scroll_horizontal(action),
-                Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
+        if Self::is_global_action(action) {
+            self.dispatch_log(action, source);
+            return;
+        }
+
+        if self.dispatch_preview(action) {
+            return;
+        }
+
+        if self.dispatch_show(action) {
+            return;
+        }
+
+        if self.dispatch_help(action) {
+            return;
+        }
+
+        self.dispatch_log(action, source);
+    }
+
+    fn dispatch_preview(&mut self, action: Action) -> bool {
+        if !self.log.preview_focused || !matches!(self.screen, Screen::Log) {
+            return false;
+        }
+
+        match action {
+            Action::MoveDown => {
+                self.log.preview_offset = (self.log.preview_offset + 1)
+                    .min(self.log.preview_lines.len().saturating_sub(1));
+            }
+            Action::MoveUp => {
+                self.log.preview_offset = self.log.preview_offset.saturating_sub(1);
+            }
+            Action::PageDown => {
+                self.log.preview_offset = (self.log.preview_offset + 10)
+                    .min(self.log.preview_lines.len().saturating_sub(1));
+            }
+            Action::PageUp => {
+                self.log.preview_offset = self.log.preview_offset.saturating_sub(10);
+            }
+            Action::ScrollRight | Action::ScrollLeft | Action::ScrollStart | Action::ScrollEnd => {
+                self.scroll_horizontal(action)
+            }
+            Action::Search => {
+                self.input = InputMode::Search(String::new());
+            }
+            Action::SearchNext => self.repeat_preview_search(true),
+            Action::SearchPrevious => self.repeat_preview_search(false),
+            Action::Back => {
+                self.log.preview_focused = false;
+                self.input = InputMode::Normal;
+            }
+            Action::Command | Action::Help => {}
+            _ => unreachable!("global actions are routed before screen dispatch"),
+        }
+
+        true
+    }
+
+    fn dispatch_show(&mut self, action: Action) -> bool {
+        let Some(focus) = self.screen.show().map(|state| state.show_focus) else {
+            return false;
+        };
+
+        match focus {
+            ShowFocus::Explorer => match action {
+                Action::MoveDown => self.move_show_down(),
+                Action::MoveUp => self.move_show_up(),
+                Action::PageDown => self.page_show_down(),
+                Action::PageUp => self.page_show_up(),
+                Action::ScrollRight
+                | Action::ScrollLeft
+                | Action::ScrollStart
+                | Action::ScrollEnd => self.scroll_horizontal(action),
                 Action::Search => {
-                    self.input = InputMode::Search(String::new());
+                    self.status = "Focus the show diff to search".into();
                 }
-                Action::SearchNext => self.repeat_preview_search(true),
-                Action::SearchPrevious => self.repeat_preview_search(false),
                 Action::Back => {
-                    self.log.preview_focused = false;
+                    self.screen = Screen::Log;
+                    self.input = InputMode::Normal;
+                    self.status.clear();
+                }
+                Action::SearchNext | Action::SearchPrevious | Action::Command | Action::Help => {}
+                _ => unreachable!("global actions are routed before screen dispatch"),
+            },
+            ShowFocus::Diff => match action {
+                Action::MoveDown => self.move_show_diff(1, true),
+                Action::MoveUp => self.move_show_diff(1, false),
+                Action::PageDown => self.move_show_diff(10, true),
+                Action::PageUp => self.move_show_diff(10, false),
+                Action::ScrollRight
+                | Action::ScrollLeft
+                | Action::ScrollStart
+                | Action::ScrollEnd => self.scroll_horizontal(action),
+                Action::Search => self.input = InputMode::Search(String::new()),
+                Action::SearchNext => self.repeat_show_search(true),
+                Action::SearchPrevious => self.repeat_show_search(false),
+                Action::Back => {
+                    self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
                     self.input = InputMode::Normal;
                 }
-                Action::Quit | Action::TogglePreview | Action::ShowMode => {}
-                _ => {}
-            }
-            if matches!(
-                action,
-                Action::Quit | Action::TogglePreview | Action::ShowMode
-            ) {
-                // These remain global even while preview owns navigation.
-            } else {
-                return;
-            }
+                Action::Command | Action::Help => {}
+                _ => unreachable!("global actions are routed before screen dispatch"),
+            },
         }
-        if let Some(focus) = self.screen.show().map(|state| state.show_focus) {
-            match focus {
-                ShowFocus::Explorer => match action {
-                    Action::MoveDown => self.move_show_down(),
-                    Action::MoveUp => self.move_show_up(),
-                    Action::PageDown => self.page_show_down(),
-                    Action::PageUp => self.page_show_up(),
-                    Action::ScrollRight
-                    | Action::ScrollLeft
-                    | Action::ScrollStart
-                    | Action::ScrollEnd => self.scroll_horizontal(action),
-                    Action::Search => {
-                        self.status = "Focus the show diff to search".into();
-                    }
-                    Action::Back => {
-                        self.screen = Screen::Log;
-                        self.input = InputMode::Normal;
-                        self.status.clear();
-                    }
-                    Action::Quit | Action::TogglePreview | Action::ShowMode => {}
-                    _ => return,
-                },
-                ShowFocus::Diff => match action {
-                    Action::MoveDown => {
-                        let show = self.screen.show_mut().unwrap();
-                        show.show_diff_offset = (show.show_diff_offset + 1)
-                            .min(show.show_diff_lines.len().saturating_sub(1));
-                        self.sync_show_selection_to_diff();
-                    }
-                    Action::MoveUp => {
-                        let show = self.screen.show_mut().unwrap();
-                        show.show_diff_offset = show.show_diff_offset.saturating_sub(1);
-                        self.sync_show_selection_to_diff();
-                    }
-                    Action::PageDown => {
-                        let show = self.screen.show_mut().unwrap();
-                        show.show_diff_offset = (show.show_diff_offset + 10)
-                            .min(show.show_diff_lines.len().saturating_sub(1));
-                        self.sync_show_selection_to_diff();
-                    }
-                    Action::PageUp => {
-                        let show = self.screen.show_mut().unwrap();
-                        show.show_diff_offset = show.show_diff_offset.saturating_sub(10);
-                        self.sync_show_selection_to_diff();
-                    }
-                    Action::ScrollRight
-                    | Action::ScrollLeft
-                    | Action::ScrollStart
-                    | Action::ScrollEnd => self.scroll_horizontal(action),
-                    Action::Search => self.input = InputMode::Search(String::new()),
-                    Action::SearchNext => self.repeat_show_search(true),
-                    Action::SearchPrevious => self.repeat_show_search(false),
-                    Action::Back => {
-                        self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
-                        self.input = InputMode::Normal;
-                    }
-                    Action::Quit | Action::TogglePreview | Action::ShowMode => {}
-                    _ => return,
-                },
-            }
-            if matches!(
-                action,
-                Action::Quit | Action::TogglePreview | Action::ShowMode
-            ) {
-                // These actions remain global while show owns navigation.
-            } else {
-                return;
-            }
+
+        true
+    }
+
+    fn dispatch_help(&mut self, action: Action) -> bool {
+        if !matches!(self.screen, Screen::Help(_)) {
+            return false;
         }
-        if matches!(self.screen, Screen::Help(_)) {
-            let last_line = self.config.help_lines().len().saturating_sub(1);
-            match action {
-                Action::MoveDown => {
-                    let help = self.screen.help_mut().unwrap();
-                    help.offset = (help.offset + 1).min(last_line);
-                }
-                Action::MoveUp => {
-                    let help = self.screen.help_mut().unwrap();
-                    help.offset = help.offset.saturating_sub(1);
-                }
-                Action::PageDown => {
-                    let help = self.screen.help_mut().unwrap();
-                    help.offset = (help.offset + 10).min(last_line);
-                }
-                Action::PageUp => {
-                    let help = self.screen.help_mut().unwrap();
-                    help.offset = help.offset.saturating_sub(10);
-                }
-                Action::ScrollRight => self.scroll_horizontal(action),
-                Action::ScrollLeft => self.scroll_horizontal(action),
-                Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
-                _ => {}
+
+        let last_line = self.config.help_lines().len().saturating_sub(1);
+        match action {
+            Action::MoveDown => {
+                let help = self.screen.help_mut().unwrap();
+                help.offset = (help.offset + 1).min(last_line);
             }
-            if matches!(
-                action,
-                Action::MoveDown
-                    | Action::MoveUp
-                    | Action::PageDown
-                    | Action::PageUp
-                    | Action::ScrollStart
-                    | Action::ScrollEnd
-                    | Action::ScrollRight
-                    | Action::ScrollLeft
-            ) {
-                return;
+            Action::MoveUp => {
+                let help = self.screen.help_mut().unwrap();
+                help.offset = help.offset.saturating_sub(1);
             }
+            Action::PageDown => {
+                let help = self.screen.help_mut().unwrap();
+                help.offset = (help.offset + 10).min(last_line);
+            }
+            Action::PageUp => {
+                let help = self.screen.help_mut().unwrap();
+                help.offset = help.offset.saturating_sub(10);
+            }
+            Action::ScrollRight | Action::ScrollLeft | Action::ScrollStart | Action::ScrollEnd => {
+                self.scroll_horizontal(action)
+            }
+            Action::Search
+            | Action::SearchNext
+            | Action::SearchPrevious
+            | Action::Command
+            | Action::Help
+            | Action::Back => return false,
+            _ => unreachable!("global actions are routed before screen dispatch"),
         }
+
+        true
+    }
+
+    fn is_global_action(action: Action) -> bool {
+        matches!(
+            action,
+            Action::Quit | Action::TogglePreview | Action::ShowMode
+        )
+    }
+
+    fn dispatch_log(&mut self, action: Action, source: &mut impl HistorySource) {
         match action {
             Action::MoveDown => self.move_down(source),
             Action::MoveUp => self.move_up(source),
@@ -622,6 +634,18 @@ impl App {
                 self.status = format!("Could not load more history: {error}");
             }
         }
+    }
+
+    fn move_show_diff(&mut self, amount: usize, forward: bool) {
+        {
+            let show = self.screen.show_mut().unwrap();
+            show.show_diff_offset = if forward {
+                (show.show_diff_offset + amount).min(show.show_diff_lines.len().saturating_sub(1))
+            } else {
+                show.show_diff_offset.saturating_sub(amount)
+            };
+        }
+        self.sync_show_selection_to_diff();
     }
 
     fn move_show_down(&mut self) {
@@ -1622,6 +1646,57 @@ mod tests {
         app.log.preview_focused = true;
         app.dispatch(Action::Quit, &mut history);
         assert!(!app.running);
+    }
+
+    #[test]
+    fn global_actions_fall_through_from_focused_screen_dispatchers() {
+        let mut preview_app = App::new(Config::default());
+        let mut preview_history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        preview_app.initialize(&mut preview_history).unwrap();
+        preview_app.handle_key(Key::Enter, &mut preview_history);
+        preview_app.dispatch(Action::ShowMode, &mut preview_history);
+        assert!(matches!(preview_app.screen, Screen::Show(_)));
+
+        let mut show_app = App::new(Config::default());
+        let mut show_history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        show_app.initialize(&mut show_history).unwrap();
+        show_app.dispatch(Action::ShowMode, &mut show_history);
+        show_app.dispatch(Action::TogglePreview, &mut show_history);
+        assert!(!show_app.log.preview_visible);
+        assert!(matches!(show_app.screen, Screen::Show(_)));
+        show_app.dispatch(Action::ShowMode, &mut show_history);
+        assert!(matches!(show_app.screen, Screen::Show(_)));
+        show_app.dispatch(Action::Quit, &mut show_history);
+        assert!(!show_app.running);
+
+        let mut help_app = App::new(Config::default());
+        let mut help_history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        help_app.initialize(&mut help_history).unwrap();
+        help_app.dispatch(Action::Help, &mut help_history);
+        help_app.dispatch(Action::TogglePreview, &mut help_history);
+        assert!(!help_app.log.preview_visible);
+        assert!(matches!(help_app.screen, Screen::Help(_)));
+        help_app.dispatch(Action::Quit, &mut help_history);
+        assert!(!help_app.running);
+
+        let mut help_show_app = App::new(Config::default());
+        let mut help_show_history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        help_show_app.initialize(&mut help_show_history).unwrap();
+        help_show_app.dispatch(Action::Help, &mut help_show_history);
+        help_show_app.dispatch(Action::ShowMode, &mut help_show_history);
+        assert!(matches!(help_show_app.screen, Screen::Show(_)));
     }
 
     #[test]
