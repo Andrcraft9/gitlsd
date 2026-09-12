@@ -17,8 +17,9 @@ People should work with coding agents as personal assistants and take full respo
 
 - Follow the user's instructions and stay within the requested scope.
 - Keep communication concise: lead with the result, then include only relevant details.
-- Make minimal, focused commits.
+- Make minimal, focused changes.
 - Match existing code style and project conventions, follow architecture.
+- Do not stage changes until a human has reviewed them and either explicitly asks you to stage them or stages them manually.
 - Do not commit or push unless explicitly asked.
 - Do not run long, destructive, or externally mutating commands without explicit permission.
 - When committing, use a concise human-written commit message and do not mention AI assistance.
