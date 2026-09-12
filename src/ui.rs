@@ -1,3 +1,9 @@
+//! Interactive terminal frontend.
+//!
+//! This module translates Crossterm events into shared keys, drives [`App`],
+//! and renders its state with Ratatui. It also owns setup and restoration of
+//! the terminal session.
+
 use std::io::{self, Stdout, Write};
 use std::time::Duration;
 

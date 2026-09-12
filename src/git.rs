@@ -1,3 +1,9 @@
+//! Repository boundary and Git CLI adapter.
+//!
+//! [`HistorySource`] is the application-facing contract. [`GitHistory`]
+//! implements it by executing configured Git commands directly, pairing
+//! Git-rendered rows with stable commit IDs, and sanitizing terminal output.
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;

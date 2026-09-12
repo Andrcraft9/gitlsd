@@ -1,3 +1,9 @@
+//! Process entry point and composition root.
+//!
+//! Startup arguments and configuration select and construct the Git adapter,
+//! application state, and interactive or debug frontend. Application behavior
+//! belongs in the library modules rather than here.
+
 use std::process::ExitCode;
 
 use clap::Parser;

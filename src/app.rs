@@ -1,3 +1,9 @@
+//! Application state machine and behavior.
+//!
+//! [`App`] owns screens, input modes, selection, pagination, search, commands,
+//! preview state, and shutdown intent. It works through [`HistorySource`] and
+//! has no dependency on terminal libraries or concrete process execution.
+
 use std::collections::HashSet;
 
 use crate::config::{Action, Config, Key};

@@ -11,6 +11,7 @@ People should work with coding agents as personal assistants and take full respo
 - Start with `README.md` for the project idea and build instructions.
 - Use `CONTRIBUTING.md` for workflow, validation, commit, and push rules.
 - Use `ARCHITECTURE.md` for top-level architecture context. If architecture changes, update it in the same change.
+- Code modules have module-level documentation. Keep it updated when module responsibilities or boundaries change.
 
 ## Operating rules
 

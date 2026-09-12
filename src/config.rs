@@ -1,3 +1,9 @@
+//! Runtime policy and frontend-independent input vocabulary.
+//!
+//! This module owns defaults, configuration discovery and parsing, effective
+//! settings, and the mapping from physical [`Key`] values to application
+//! [`Action`] values.
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;

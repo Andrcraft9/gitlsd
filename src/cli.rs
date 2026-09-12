@@ -1,3 +1,8 @@
+//! Process startup arguments.
+//!
+//! This module only describes command-line input. Loading configuration and
+//! selecting a frontend remain responsibilities of the composition root.
+
 use std::path::PathBuf;
 
 use clap::Parser;

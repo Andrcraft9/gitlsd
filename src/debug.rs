@@ -1,3 +1,9 @@
+//! Deterministic frontend for integration testing.
+//!
+//! Script tokens become the same keys used by the interactive frontend and
+//! drive the same [`App`]. The resulting stable, plain-text snapshot avoids a
+//! TTY while preserving the real configuration and Git process boundaries.
+
 use std::fmt::Write;
 
 use crate::app::{App, Screen};
