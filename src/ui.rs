@@ -1,8 +1,8 @@
 //! Interactive terminal frontend.
 //!
 //! This module translates Crossterm events into shared keys, drives [`App`],
-//! and renders its state with Ratatui. It also owns setup and restoration of
-//! the terminal session.
+//! and renders log, preview, help, and show state with Ratatui. It also owns
+//! setup and restoration of the terminal session.
 
 use std::io::{self, Stdout, Write};
 use std::time::Duration;
@@ -24,17 +24,18 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Screen};
+use crate::app::{App, Screen, ShowFocus};
 use crate::config::Key;
 use crate::git::HistorySource;
 
 pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
     let mut session = TerminalSession::start()?;
     let mut log_state = ListState::default();
+    let mut show_state = ListState::default();
     while app.running {
         session
             .terminal
-            .draw(|frame| render(frame, app, &mut log_state))?;
+            .draw(|frame| render_with_states(frame, app, &mut log_state, &mut show_state))?;
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
@@ -95,7 +96,7 @@ fn restore_terminal(writer: &mut impl Write) -> io::Result<()> {
     execute!(writer, DisableMouseCapture, LeaveAlternateScreen, Show)
 }
 
-fn preview_layout_direction(content_area: ratatui::layout::Rect) -> Direction {
+fn content_split_direction(content_area: ratatui::layout::Rect) -> Direction {
     // Terminal cells are typically about twice as tall as they are wide, so
     // compare an approximate physical aspect ratio instead of raw cell counts.
     if content_area.width > content_area.height.saturating_mul(2) {
@@ -114,7 +115,7 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
         Screen::Help => chunks[0],
         Screen::Log if app.preview_visible => {
             let panes = Layout::default()
-                .direction(preview_layout_direction(chunks[0]))
+                .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[0]);
             if app.preview_focused {
@@ -124,12 +125,36 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
             }
         }
         Screen::Log => chunks[0],
+        Screen::Show => {
+            let panes = Layout::default()
+                .direction(content_split_direction(chunks[0]))
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[0]);
+            match app.show_focus {
+                ShowFocus::Explorer => panes[0],
+                ShowFocus::Diff => panes[1],
+            }
+        }
     };
-    let marker_width = usize::from(app.screen == Screen::Log && !app.preview_focused) * 2;
+    let marker_width = usize::from(
+        (app.screen == Screen::Log && !app.preview_focused)
+            || (app.screen == Screen::Show && app.show_focus == ShowFocus::Explorer),
+    ) * 2;
     usize::from(pane.width.saturating_sub(2)).saturating_sub(marker_width)
 }
 
+#[cfg(test)]
 fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) {
+    let mut show_state = ListState::default();
+    render_with_states(frame, app, log_state, &mut show_state);
+}
+
+fn render_with_states(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    log_state: &mut ListState,
+    show_state: &mut ListState,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -159,7 +184,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
             });
             if app.preview_visible {
                 let panes = Layout::default()
-                    .direction(preview_layout_direction(chunks[0]))
+                    .direction(content_split_direction(chunks[0]))
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[0]);
                 frame.render_stateful_widget(list, panes[0], log_state);
@@ -201,10 +226,104 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) 
                 chunks[0],
             );
         }
+        Screen::Show => render_show(frame, app, chunks[0], show_state),
     }
 
     let status = app.input_label().unwrap_or_else(|| app.status.clone());
     frame.render_widget(Paragraph::new(status), chunks[1]);
+}
+
+fn render_show(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    area: ratatui::layout::Rect,
+    show_state: &mut ListState,
+) {
+    let panes = Layout::default()
+        .direction(content_split_direction(area))
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let explorer = panes[0];
+    let metadata_height = app
+        .show_metadata
+        .len()
+        .saturating_add(2)
+        .min(usize::from(explorer.height.saturating_sub(1)))
+        .try_into()
+        .unwrap_or(u16::MAX);
+    let explorer_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(metadata_height), Constraint::Min(1)])
+        .split(explorer);
+
+    let metadata = app
+        .show_metadata
+        .iter()
+        .map(|line| styled_line(line))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(metadata)
+            .scroll((
+                0,
+                app.show_explorer_horizontal_offset
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+            ))
+            .block(Block::default().title(" commit ").borders(Borders::ALL)),
+        explorer_chunks[0],
+    );
+
+    let files = app
+        .show_files
+        .iter()
+        .map(|file| {
+            ListItem::new(scrolled_line(
+                &file.display,
+                app.show_explorer_horizontal_offset,
+                None,
+            ))
+        })
+        .collect::<Vec<_>>();
+    show_state.select(app.show_selected);
+    let files = List::new(files)
+        .block(
+            Block::default()
+                .title(if app.show_focus == ShowFocus::Explorer {
+                    " files (focused) "
+                } else {
+                    " files "
+                })
+                .borders(Borders::ALL),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(files, explorer_chunks[1], show_state);
+
+    let diff = app
+        .show_diff_lines
+        .iter()
+        .map(|line| highlighted_line(line, app.show_search_query()))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(diff)
+            .scroll((
+                app.show_diff_offset.try_into().unwrap_or(u16::MAX),
+                app.show_diff_horizontal_offset
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+            ))
+            .block(
+                Block::default()
+                    .title(if app.show_focus == ShowFocus::Diff {
+                        " diff (focused) "
+                    } else {
+                        " diff "
+                    })
+                    .borders(Borders::ALL),
+            ),
+        panes[1],
+    );
 }
 
 fn styled_line(text: &str) -> Line<'_> {
@@ -450,7 +569,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::config::{Action, Config};
-    use crate::git::{CommitRecord, GitError};
+    use crate::git::{ChangedFile, CommitRecord, GitError};
 
     use super::*;
 
@@ -521,17 +640,44 @@ mod tests {
     #[test]
     fn preview_layout_uses_content_area_cell_aspect_ratio() {
         assert_eq!(
-            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 180, 100)),
+            content_split_direction(ratatui::layout::Rect::new(0, 0, 180, 100)),
             Direction::Vertical
         );
         assert_eq!(
-            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 200, 100)),
+            content_split_direction(ratatui::layout::Rect::new(0, 0, 200, 100)),
             Direction::Vertical
         );
         assert_eq!(
-            preview_layout_direction(ratatui::layout::Rect::new(0, 0, 201, 100)),
+            content_split_direction(ratatui::layout::Rect::new(0, 0, 201, 100)),
             Direction::Horizontal
         );
+    }
+
+    #[test]
+    fn active_width_tracks_each_show_pane_and_explorer_marker() {
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Show;
+        for area in [
+            ratatui::layout::Rect::new(0, 0, 201, 101),
+            ratatui::layout::Rect::new(0, 0, 40, 101),
+        ] {
+            let content = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area)[0];
+            let panes = Layout::default()
+                .direction(content_split_direction(content))
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(content);
+
+            app.show_focus = ShowFocus::Explorer;
+            let explorer_width = usize::from(panes[0].width.saturating_sub(2)).saturating_sub(2);
+            assert_eq!(active_content_width(area, &app), explorer_width);
+
+            app.show_focus = ShowFocus::Diff;
+            let diff_width = usize::from(panes[1].width.saturating_sub(2));
+            assert_eq!(active_content_width(area, &app), diff_width);
+        }
     }
 
     #[test]
@@ -713,6 +859,101 @@ mod tests {
                 "p"
             );
         }
+    }
+
+    #[test]
+    fn renders_show_explorer_and_diff_in_both_orientations() {
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Show;
+        app.show_metadata = vec!["commit full-id".into(), "Author: Test".into()];
+        app.show_files = vec![ChangedFile {
+            display: "M src/lib.rs".into(),
+            old_path: Some("src/lib.rs".into()),
+            new_path: Some("src/lib.rs".into()),
+        }];
+        app.show_selected = Some(0);
+        app.show_diff_lines = vec!["diff --git a/src/lib.rs b/src/lib.rs".into()];
+        let mut log_state = ListState::default();
+        for (width, height, direction) in [
+            (80, 10, Direction::Horizontal),
+            (30, 20, Direction::Vertical),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("commit full-id"));
+            assert!(text.contains("src/lib.rs"));
+            assert!(text.contains("diff --git"));
+            assert!(text.contains("files (focused)"));
+            assert!(!text.contains("gitlsd log"));
+
+            let panes = Layout::default()
+                .direction(direction)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((panes[1].x + 2, panes[1].y))
+                    .expect("diff title")
+                    .symbol(),
+                "d"
+            );
+
+            let explorer = panes[0];
+            let selected_row_y = explorer.y + 5;
+            assert!((explorer.x..explorer.x + explorer.width).any(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, selected_row_y))
+                    .is_some_and(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
+            }));
+        }
+
+        app.show_focus = ShowFocus::Diff;
+        app.show_diff_lines = vec!["\x1b[31mcolored diff\x1b[m".into()];
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("files "));
+        assert!(!text.contains("files (focused)"));
+        assert!(text.contains("diff (focused)"));
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(ratatui::layout::Rect::new(0, 0, 80, 9));
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((panes[1].x + 1, panes[1].y + 1))
+                .expect("styled diff line")
+                .style()
+                .fg,
+            Some(Color::Indexed(1))
+        );
+    }
+
+    #[test]
+    fn renders_scrolled_show_metadata() {
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Show;
+        app.show_metadata = vec!["prefix-hidden metadata".into()];
+        app.show_explorer_horizontal_offset = "prefix-hidden ".len();
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("metadata"));
+        assert!(!text.contains("prefix-hidden"));
     }
 
     #[test]

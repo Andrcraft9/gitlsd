@@ -30,6 +30,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         directory,
         config.log_command.clone(),
         config.preview_command.clone(),
+        config.show_commit_command.clone(),
+        config.show_command.clone(),
     );
     let mut app = App::new(config);
     app.initialize(&mut source)?;

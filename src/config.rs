@@ -29,10 +29,11 @@ pub enum Action {
     Back,
     Quit,
     TogglePreview,
+    ShowMode,
 }
 
 impl Action {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::MoveDown,
         Self::MoveUp,
         Self::PageDown,
@@ -49,6 +50,7 @@ impl Action {
         Self::Back,
         Self::Quit,
         Self::TogglePreview,
+        Self::ShowMode,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -69,6 +71,7 @@ impl Action {
             Self::Back => "back",
             Self::Quit => "quit",
             Self::TogglePreview => "toggle-preview",
+            Self::ShowMode => "show-mode",
         }
     }
 }
@@ -156,6 +159,8 @@ impl FromStr for Key {
 pub struct Config {
     pub log_command: Vec<String>,
     pub preview_command: Vec<String>,
+    pub show_commit_command: Vec<String>,
+    pub show_command: Vec<String>,
     pub batch_size: usize,
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
@@ -183,6 +188,7 @@ impl Default for Config {
             (Key::Char('q'), Action::Quit),
             (Key::Ctrl('c'), Action::Quit),
             (Key::Char('p'), Action::TogglePreview),
+            (Key::Char('d'), Action::ShowMode),
         ]
         .into_iter()
         .collect();
@@ -200,6 +206,19 @@ impl Default for Config {
                 "show".into(),
                 "--stat".into(),
                 "--patch".into(),
+                "--color=always".into(),
+            ],
+            show_commit_command: vec![
+                "git".into(),
+                "show".into(),
+                "--no-patch".into(),
+                "--color=always".into(),
+            ],
+            show_command: vec![
+                "git".into(),
+                "show".into(),
+                "--patch".into(),
+                "--format=".into(),
                 "--color=always".into(),
             ],
             batch_size: 100,
@@ -319,13 +338,16 @@ impl Config {
                 }
             }
             "preview" => {
-                if values.get(..2) != Some(&["git".to_owned(), "show".to_owned()]) {
-                    return Err(ConfigError::new(
-                        location,
-                        "required form: `set preview git show <options>`",
-                    ));
-                }
+                validate_show(values, "preview", location)?;
                 self.preview_command = values.to_vec();
+            }
+            "show-commit" => {
+                validate_show(values, "show-commit", location)?;
+                self.show_commit_command = values.to_vec();
+            }
+            "show" => {
+                validate_show(values, "show", location)?;
+                self.show_command = values.to_vec();
             }
             _ => {
                 return Err(ConfigError::new(
@@ -385,6 +407,22 @@ impl Config {
                     .join(" ")
             ),
             format!(
+                "setting.show-commit={}",
+                self.show_commit_command
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            format!(
+                "setting.show={}",
+                self.show_command
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            format!(
                 "setting.config={}",
                 self.source
                     .as_ref()
@@ -398,6 +436,16 @@ impl Config {
         );
         lines
     }
+}
+
+fn validate_show(arguments: &[String], setting: &str, location: &str) -> Result<(), ConfigError> {
+    if arguments.get(..2) != Some(&["git".to_owned(), "show".to_owned()]) {
+        return Err(ConfigError::new(
+            location,
+            format!("required form: `set {setting} git show <options>`"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_log(arguments: &[String]) -> Result<(), String> {
@@ -622,6 +670,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_show_commands_and_action_with_reversible_help() {
+        let config = Config::parse(
+            "set show-commit = git show --format='%H' --no-patch\nset show git show --patch --format=\nbind x show-mode\n",
+            Path::new("sample.conf"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.show_commit_command,
+            ["git", "show", "--format=%H", "--no-patch"]
+        );
+        assert_eq!(config.show_command, ["git", "show", "--patch", "--format="]);
+        assert_eq!(config.action_for(&Key::Char('d')), Some(Action::ShowMode));
+        assert_eq!(config.action_for(&Key::Char('x')), Some(Action::ShowMode));
+        assert!(config.help_lines().contains(
+            &"setting.show-commit=\"git\" \"show\" \"--format=%H\" \"--no-patch\"".into()
+        ));
+        assert!(
+            config
+                .help_lines()
+                .contains(&"setting.show=\"git\" \"show\" \"--patch\" \"--format=\"".into())
+        );
+    }
+
+    #[test]
     fn horizontal_bindings_are_available_by_default_and_configurable() {
         let config = Config::parse(
             "bind x scroll-right\nbind y scroll-left\n",
@@ -677,5 +750,23 @@ mod tests {
             error.to_string(),
             "bad.conf:1: required form: `set preview git show <options>`"
         );
+    }
+
+    #[test]
+    fn invalid_show_commands_report_file_and_line() {
+        for (setting, message) in [
+            (
+                "show-commit",
+                "required form: `set show-commit git show <options>`",
+            ),
+            ("show", "required form: `set show git show <options>`"),
+        ] {
+            let error = Config::parse(
+                &format!("set {setting} git log --oneline"),
+                Path::new("bad.conf"),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), format!("bad.conf:1: {message}"));
+        }
     }
 }

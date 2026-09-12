@@ -35,10 +35,19 @@ flowchart TD
 - `main` composes the application and selects a frontend.
 - `cli` defines startup arguments.
 - `config` resolves runtime policy and input mappings.
-- `app` is the state machine that owns application state and behavior.
-- `git` provides repository data through the Git CLI.
-- `ui` is the interactive terminal frontend.
-- `debug` is the deterministic scripted frontend used by integration tests.
+- `app` is the state machine that owns application state and behavior,
+  including the log/preview screen and the full-screen show explorer/diff
+  screen. Show navigation never mutates the log selection, and diff scrolling
+  keeps the explorer selection synchronized with the current patch section.
+- `git` provides repository data through the Git CLI. Its `ShowData` result
+  keeps metadata, fixed name-status rows, and the complete configured diff
+  together so the app cannot render mismatched partial show loads.
+- `ui` is the interactive terminal frontend. It renders show mode across the
+  full content area and reuses the content-area aspect-ratio split rule used
+  by the log/preview screen.
+- `debug` is the deterministic scripted frontend used by integration tests;
+  it exposes show focus, selection, offsets, metadata, file rows, and diff
+  content in stable plain text.
 
 Detailed module responsibilities and implementation contracts are documented
 in the code.

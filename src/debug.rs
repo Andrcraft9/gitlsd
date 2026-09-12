@@ -2,11 +2,12 @@
 //!
 //! Script tokens become the same keys used by the interactive frontend and
 //! drive the same [`App`]. The resulting stable, plain-text snapshot avoids a
-//! TTY while preserving the real configuration and Git process boundaries.
+//! TTY while preserving the real configuration and Git process boundaries,
+//! including show metadata, file rows, and diff state.
 
 use std::fmt::Write;
 
-use crate::app::{App, Screen};
+use crate::app::{App, Screen, ShowFocus};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -40,6 +41,7 @@ pub fn snapshot(app: &App) -> String {
     let screen = match app.screen {
         Screen::Log => "log",
         Screen::Help => "help",
+        Screen::Show => "show",
     };
     writeln!(output, "screen={screen}").unwrap();
     writeln!(output, "running={}", app.running).unwrap();
@@ -66,6 +68,34 @@ pub fn snapshot(app: &App) -> String {
         app.help_horizontal_offset
     )
     .unwrap();
+    if app.screen == Screen::Show {
+        let focus = match app.show_focus {
+            ShowFocus::Explorer => "explorer",
+            ShowFocus::Diff => "diff",
+        };
+        writeln!(output, "show.focus={focus}").unwrap();
+        writeln!(
+            output,
+            "show.selected={}",
+            app.show_selected
+                .map_or_else(String::new, |selected| selected.to_string())
+        )
+        .unwrap();
+        writeln!(output, "show.explorer.offset={}", app.show_explorer_offset).unwrap();
+        writeln!(
+            output,
+            "show.explorer.horizontal-offset={}",
+            app.show_explorer_horizontal_offset
+        )
+        .unwrap();
+        writeln!(output, "show.diff.offset={}", app.show_diff_offset).unwrap();
+        writeln!(
+            output,
+            "show.diff.horizontal-offset={}",
+            app.show_diff_horizontal_offset
+        )
+        .unwrap();
+    }
     if let Some(record) = app.selected_record() {
         writeln!(output, "commit={}", record.id).unwrap();
         writeln!(
@@ -83,6 +113,29 @@ pub fn snapshot(app: &App) -> String {
         writeln!(output, "help:").unwrap();
         for line in app.config.help_lines() {
             writeln!(output, "  {line}").unwrap();
+        }
+    } else if app.screen == Screen::Show {
+        writeln!(output, "show.metadata:").unwrap();
+        for line in &app.show_metadata {
+            writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
+        }
+        writeln!(output, "show.files:").unwrap();
+        for (index, file) in app.show_files.iter().enumerate() {
+            let marker = if app.show_selected == Some(index) {
+                '>'
+            } else {
+                ' '
+            };
+            writeln!(
+                output,
+                "{marker} {index} {}",
+                crate::git::safe_text(&file.display, false)
+            )
+            .unwrap();
+        }
+        writeln!(output, "show.diff:").unwrap();
+        for line in &app.show_diff_lines {
+            writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
     } else {
         if app.preview_visible {

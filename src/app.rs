@@ -1,19 +1,29 @@
 //! Application state machine and behavior.
 //!
 //! [`App`] owns screens, input modes, selection, pagination, search, commands,
-//! preview state, and shutdown intent. It works through [`HistorySource`] and
-//! has no dependency on terminal libraries or concrete process execution.
+//! preview and show state, and shutdown intent. It works through
+//! [`HistorySource`] and has no dependency on terminal libraries or concrete
+//! process execution.
 
 use std::collections::HashSet;
 
 use crate::config::{Action, Config, Key};
-use crate::git::{CommitRecord, GitError, HistorySource};
+use crate::git::{
+    ChangedFile, CommitRecord, GitError, HistorySource, file_at_patch_offset, patch_offset,
+};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
     Log,
     Help,
+    Show,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShowFocus {
+    Explorer,
+    Diff,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,11 +49,21 @@ pub struct App {
     pub preview_lines: Vec<String>,
     pub preview_offset: usize,
     pub preview_horizontal_offset: usize,
+    pub show_focus: ShowFocus,
+    pub show_metadata: Vec<String>,
+    pub show_files: Vec<ChangedFile>,
+    pub show_diff_lines: Vec<String>,
+    pub show_selected: Option<usize>,
+    pub show_explorer_offset: usize,
+    pub show_explorer_horizontal_offset: usize,
+    pub show_diff_offset: usize,
+    pub show_diff_horizontal_offset: usize,
     horizontal_viewport_width: usize,
     has_more: bool,
     next_offset: usize,
     last_search: Option<String>,
     last_preview_search: Option<String>,
+    last_show_search: Option<String>,
 }
 
 impl App {
@@ -64,11 +84,21 @@ impl App {
             preview_lines: Vec::new(),
             preview_offset: 0,
             preview_horizontal_offset: 0,
+            show_focus: ShowFocus::Explorer,
+            show_metadata: Vec::new(),
+            show_files: Vec::new(),
+            show_diff_lines: Vec::new(),
+            show_selected: None,
+            show_explorer_offset: 0,
+            show_explorer_horizontal_offset: 0,
+            show_diff_offset: 0,
+            show_diff_horizontal_offset: 0,
             horizontal_viewport_width: 1,
             has_more: true,
             next_offset: 0,
             last_search: None,
             last_preview_search: None,
+            last_show_search: None,
         }
     }
 
@@ -117,11 +147,14 @@ impl App {
             },
             InputMode::Normal => {
                 if key == Key::Enter {
-                    if self.screen == Screen::Log
-                        && self.preview_visible
-                        && self.selected_record().is_some()
-                    {
-                        self.preview_focused = true;
+                    match self.screen {
+                        Screen::Log if self.preview_visible && self.selected_record().is_some() => {
+                            self.preview_focused = true;
+                        }
+                        Screen::Show if self.show_focus == ShowFocus::Explorer => {
+                            self.focus_show_diff();
+                        }
+                        _ => {}
                     }
                     return;
                 }
@@ -161,11 +194,79 @@ impl App {
                     self.preview_focused = false;
                     self.input = InputMode::Normal;
                 }
-                Action::Quit | Action::TogglePreview => {}
+                Action::Quit | Action::TogglePreview | Action::ShowMode => {}
                 _ => {}
             }
-            if matches!(action, Action::Quit | Action::TogglePreview) {
+            if matches!(
+                action,
+                Action::Quit | Action::TogglePreview | Action::ShowMode
+            ) {
                 // These remain global even while preview owns navigation.
+            } else {
+                return;
+            }
+        }
+        if self.screen == Screen::Show {
+            match self.show_focus {
+                ShowFocus::Explorer => match action {
+                    Action::MoveDown => self.move_show_down(),
+                    Action::MoveUp => self.move_show_up(),
+                    Action::PageDown => self.page_show_down(),
+                    Action::PageUp => self.page_show_up(),
+                    Action::ScrollRight
+                    | Action::ScrollLeft
+                    | Action::ScrollStart
+                    | Action::ScrollEnd => self.scroll_horizontal(action),
+                    Action::Search => {
+                        self.status = "Focus the show diff to search".into();
+                    }
+                    Action::Back => {
+                        self.screen = Screen::Log;
+                        self.input = InputMode::Normal;
+                        self.status.clear();
+                    }
+                    Action::Quit | Action::TogglePreview | Action::ShowMode => {}
+                    _ => return,
+                },
+                ShowFocus::Diff => match action {
+                    Action::MoveDown => {
+                        self.show_diff_offset = (self.show_diff_offset + 1)
+                            .min(self.show_diff_lines.len().saturating_sub(1));
+                        self.sync_show_selection_to_diff();
+                    }
+                    Action::MoveUp => {
+                        self.show_diff_offset = self.show_diff_offset.saturating_sub(1);
+                        self.sync_show_selection_to_diff();
+                    }
+                    Action::PageDown => {
+                        self.show_diff_offset = (self.show_diff_offset + 10)
+                            .min(self.show_diff_lines.len().saturating_sub(1));
+                        self.sync_show_selection_to_diff();
+                    }
+                    Action::PageUp => {
+                        self.show_diff_offset = self.show_diff_offset.saturating_sub(10);
+                        self.sync_show_selection_to_diff();
+                    }
+                    Action::ScrollRight
+                    | Action::ScrollLeft
+                    | Action::ScrollStart
+                    | Action::ScrollEnd => self.scroll_horizontal(action),
+                    Action::Search => self.input = InputMode::Search(String::new()),
+                    Action::SearchNext => self.repeat_show_search(true),
+                    Action::SearchPrevious => self.repeat_show_search(false),
+                    Action::Back => {
+                        self.show_focus = ShowFocus::Explorer;
+                        self.input = InputMode::Normal;
+                    }
+                    Action::Quit | Action::TogglePreview | Action::ShowMode => {}
+                    _ => return,
+                },
+            }
+            if matches!(
+                action,
+                Action::Quit | Action::TogglePreview | Action::ShowMode
+            ) {
+                // These actions remain global while show owns navigation.
             } else {
                 return;
             }
@@ -248,6 +349,7 @@ impl App {
                     self.reload_preview(source);
                 }
             }
+            Action::ShowMode => self.open_show(source),
             Action::Quit => {
                 self.running = false;
                 self.status = "Quit requested".into();
@@ -262,6 +364,11 @@ impl App {
             &mut self.preview_horizontal_offset
         } else if self.screen == Screen::Help {
             &mut self.help_horizontal_offset
+        } else if self.screen == Screen::Show {
+            match self.show_focus {
+                ShowFocus::Explorer => &mut self.show_explorer_horizontal_offset,
+                ShowFocus::Diff => &mut self.show_diff_horizontal_offset,
+            }
         } else {
             &mut self.log_horizontal_offset
         };
@@ -275,27 +382,41 @@ impl App {
     }
 
     fn max_horizontal_offset(&self) -> usize {
-        let content_width = if self.preview_focused && self.screen == Screen::Log {
-            self.preview_lines
+        let content_width = match self.screen {
+            Screen::Log if self.preview_focused => self
+                .preview_lines
                 .iter()
                 .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
                 .max()
-                .unwrap_or(0)
-        } else if self.screen == Screen::Help {
-            self.config
+                .unwrap_or(0),
+            Screen::Help => self
+                .config
                 .help_lines()
                 .iter()
                 .map(|line| UnicodeWidthStr::width(line.as_str()))
                 .max()
-                .unwrap_or(0)
-        } else {
-            self.records
+                .unwrap_or(0),
+            Screen::Show if self.show_focus == ShowFocus::Diff => self
+                .show_diff_lines
+                .iter()
+                .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
+                .max()
+                .unwrap_or(0),
+            Screen::Show => self
+                .show_metadata
+                .iter()
+                .chain(self.show_files.iter().map(|file| &file.display))
+                .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
+                .max()
+                .unwrap_or(0),
+            Screen::Log => self
+                .records
                 .iter()
                 .map(|record| {
                     UnicodeWidthStr::width(crate::git::safe_text(&record.display, false).as_str())
                 })
                 .max()
-                .unwrap_or(0)
+                .unwrap_or(0),
         };
         content_width.saturating_sub(self.horizontal_viewport_width)
     }
@@ -317,6 +438,42 @@ impl App {
             if let Err(error) = self.fetch_more(source) {
                 self.status = format!("Could not load more history: {error}");
             }
+        }
+    }
+
+    fn move_show_down(&mut self) {
+        let Some(selected) = self.show_selected else {
+            return;
+        };
+        if selected + 1 < self.show_files.len() {
+            self.show_selected = Some(selected + 1);
+            self.show_explorer_offset = selected + 1;
+        }
+    }
+
+    fn move_show_up(&mut self) {
+        if let Some(selected) = self.show_selected {
+            self.show_selected = Some(selected.saturating_sub(1));
+            self.show_explorer_offset = selected.saturating_sub(1);
+        }
+    }
+
+    fn page_show_down(&mut self) {
+        let Some(selected) = self.show_selected else {
+            return;
+        };
+        if !self.show_files.is_empty() {
+            let next = (selected + 10).min(self.show_files.len() - 1);
+            self.show_selected = Some(next);
+            self.show_explorer_offset = next;
+        }
+    }
+
+    fn page_show_up(&mut self) {
+        if let Some(selected) = self.show_selected {
+            let next = selected.saturating_sub(10);
+            self.show_selected = Some(next);
+            self.show_explorer_offset = next;
         }
     }
 
@@ -352,6 +509,11 @@ impl App {
     fn submit_search(&mut self, query: String, forward: bool, source: &mut impl HistorySource) {
         if query.is_empty() {
             self.status = "Search query is empty".into();
+            return;
+        }
+        if self.screen == Screen::Show && self.show_focus == ShowFocus::Diff {
+            self.last_show_search = Some(query);
+            self.search_show_diff(forward, true);
             return;
         }
         if self.preview_focused {
@@ -491,6 +653,127 @@ impl App {
         }
     }
 
+    fn open_show(&mut self, source: &mut impl HistorySource) {
+        let Some(id) = self.selected_record().map(|record| record.id.clone()) else {
+            self.status = "Could not open show: No selected commit".into();
+            return;
+        };
+
+        self.reset_show_state();
+        match source.load_show(&id) {
+            Ok(data) => {
+                self.show_metadata = data.metadata;
+                self.show_files = data.files;
+                self.show_diff_lines = data.diff;
+                self.show_selected = (!self.show_files.is_empty()).then_some(0);
+                self.screen = Screen::Show;
+                self.show_focus = ShowFocus::Explorer;
+                self.input = InputMode::Normal;
+                self.status.clear();
+            }
+            Err(error) => {
+                self.screen = Screen::Log;
+                self.status = format!("Could not load show: {error}");
+            }
+        }
+    }
+
+    fn reset_show_state(&mut self) {
+        self.show_focus = ShowFocus::Explorer;
+        self.show_metadata.clear();
+        self.show_files.clear();
+        self.show_diff_lines.clear();
+        self.show_selected = None;
+        self.show_explorer_offset = 0;
+        self.show_explorer_horizontal_offset = 0;
+        self.show_diff_offset = 0;
+        self.show_diff_horizontal_offset = 0;
+        self.last_show_search = None;
+    }
+
+    fn focus_show_diff(&mut self) {
+        let Some(selected) = self.show_selected else {
+            return;
+        };
+        let Some(file) = self.show_files.get(selected) else {
+            self.show_selected = None;
+            return;
+        };
+        self.show_focus = ShowFocus::Diff;
+        self.show_diff_horizontal_offset = 0;
+        if let Some(offset) = patch_offset(&self.show_diff_lines, file) {
+            self.show_diff_offset = offset;
+            self.status.clear();
+        } else {
+            self.show_diff_offset = 0;
+            self.status = format!(
+                "Patch location unavailable for {}",
+                crate::git::safe_text(&file.display, false)
+            );
+        }
+    }
+
+    fn sync_show_selection_to_diff(&mut self) {
+        if let Some(selected) = file_at_patch_offset(
+            &self.show_diff_lines,
+            &self.show_files,
+            self.show_diff_offset,
+        ) {
+            self.show_selected = Some(selected);
+            self.show_explorer_offset = selected;
+        }
+    }
+
+    fn repeat_show_search(&mut self, forward: bool) {
+        self.search_show_diff(forward, false);
+    }
+
+    fn search_show_diff(&mut self, forward: bool, wrap: bool) {
+        let Some(query) = self.last_show_search.clone() else {
+            self.status = "No previous search".into();
+            return;
+        };
+        let query_lower = query.to_lowercase();
+        let length = self.show_diff_lines.len();
+        if length == 0 {
+            self.status = format!("No match for `{query}`");
+            return;
+        }
+        let matches = |index: &usize| {
+            crate::git::safe_text(&self.show_diff_lines[*index], false)
+                .to_lowercase()
+                .contains(&query_lower)
+        };
+        let index = if forward {
+            let later = (self.show_diff_offset + 1..length).find(&matches);
+            later.or_else(|| {
+                wrap.then(|| (0..=self.show_diff_offset.min(length - 1)).find(&matches))
+                    .flatten()
+            })
+        } else {
+            let earlier = (0..self.show_diff_offset).rev().find(&matches);
+            earlier.or_else(|| {
+                wrap.then(|| (self.show_diff_offset..length).rev().find(&matches))
+                    .flatten()
+            })
+        };
+        if let Some(index) = index {
+            self.show_diff_offset = index;
+            self.sync_show_selection_to_diff();
+            self.status = format!("Match for `{query}`");
+        } else if !wrap
+            && self
+                .show_diff_lines
+                .iter()
+                .enumerate()
+                .any(|(index, _)| matches(&index))
+        {
+            self.status = if forward { "(END)" } else { "(TOP)" }.into();
+        } else {
+            self.status = format!("No match for `{query}`");
+        }
+    }
+
     fn submit_command(&mut self, command: &str) {
         match command.trim() {
             "help" | "h" => {
@@ -527,6 +810,10 @@ impl App {
     pub fn preview_search_query(&self) -> Option<&str> {
         self.last_preview_search.as_deref()
     }
+
+    pub fn show_search_query(&self) -> Option<&str> {
+        self.last_show_search.as_deref()
+    }
 }
 
 fn matches_record(record: &CommitRecord, query: &str) -> bool {
@@ -538,6 +825,7 @@ fn matches_record(record: &CommitRecord, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::ShowData;
 
     struct FakeHistory {
         records: Vec<CommitRecord>,
@@ -566,6 +854,53 @@ mod tests {
                 display: format!("Subject {index}"),
             })
             .collect()
+    }
+
+    fn show_data() -> ShowData {
+        ShowData {
+            metadata: vec!["commit id-0".into(), "Author: Test".into()],
+            files: vec![
+                ChangedFile {
+                    display: "M one.rs".into(),
+                    old_path: Some("one.rs".into()),
+                    new_path: Some("one.rs".into()),
+                },
+                ChangedFile {
+                    display: "R100 old.rs new.rs".into(),
+                    old_path: Some("old.rs".into()),
+                    new_path: Some("new.rs".into()),
+                },
+            ],
+            diff: vec![
+                "".into(),
+                "diff --git a/one.rs b/one.rs".into(),
+                "@@ -1 +1 @@".into(),
+                "needle".into(),
+                "diff --git a/old.rs b/new.rs".into(),
+                "other needle".into(),
+            ],
+        }
+    }
+
+    struct ShowHistory {
+        records: Vec<CommitRecord>,
+        result: Result<ShowData, GitError>,
+    }
+
+    impl HistorySource for ShowHistory {
+        fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
+            Ok(self
+                .records
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn load_show(&mut self, _id: &str) -> Result<ShowData, GitError> {
+            self.result.clone()
+        }
     }
 
     #[test]
@@ -1074,5 +1409,278 @@ mod tests {
         app.preview_focused = true;
         app.dispatch(Action::Quit, &mut history);
         assert!(!app.running);
+    }
+
+    #[test]
+    fn show_navigation_keeps_log_selection_and_escape_has_two_stages() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(2),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.selected = 1;
+        app.dispatch(Action::ShowMode, &mut history);
+
+        assert_eq!(app.screen, Screen::Show);
+        assert_eq!(app.show_focus, ShowFocus::Explorer);
+        assert_eq!(app.show_selected, Some(0));
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.status, "");
+
+        app.dispatch(Action::MoveDown, &mut history);
+        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.selected, 1);
+        app.handle_key(Key::Enter, &mut history);
+        assert_eq!(app.show_focus, ShowFocus::Diff);
+        assert_eq!(app.show_diff_offset, 4);
+
+        app.dispatch(Action::MoveDown, &mut history);
+        assert_eq!(app.show_diff_offset, 5);
+        assert_eq!(app.selected, 1);
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.screen, Screen::Show);
+        assert_eq!(app.show_focus, ShowFocus::Explorer);
+        assert_eq!(app.show_selected, Some(1));
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.status, "");
+    }
+
+    #[test]
+    fn scrolling_show_diff_keeps_explorer_selection_on_current_file() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::ShowMode, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+
+        for _ in 0..3 {
+            app.dispatch(Action::MoveDown, &mut history);
+        }
+        assert_eq!(app.show_diff_offset, 4);
+        assert_eq!(app.show_selected, Some(1));
+
+        app.dispatch(Action::MoveUp, &mut history);
+        assert_eq!(app.show_diff_offset, 3);
+        assert_eq!(app.show_selected, Some(0));
+        app.dispatch(Action::PageDown, &mut history);
+        assert_eq!(app.show_diff_offset, 5);
+        assert_eq!(app.show_selected, Some(1));
+    }
+
+    #[test]
+    fn show_search_keeps_explorer_selection_on_the_matched_file() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::ShowMode, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Char('/'), &mut history);
+        for key in "other".chars().map(Key::Char).chain([Key::Enter]) {
+            app.handle_key(key, &mut history);
+        }
+        assert_eq!(app.show_diff_offset, 5);
+        assert_eq!(app.show_selected, Some(1));
+    }
+
+    #[test]
+    fn show_page_navigation_and_explorer_scrolling_keep_log_state_independent() {
+        let mut data = show_data();
+        data.files = (0..25)
+            .map(|index| ChangedFile {
+                display: format!("M file-{index}-with-a-long-name.rs"),
+                old_path: Some(format!("file-{index}.rs")),
+                new_path: Some(format!("file-{index}.rs")),
+            })
+            .collect();
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(2),
+            result: Ok(data),
+        };
+        app.initialize(&mut history).unwrap();
+        app.selected = 1;
+        app.dispatch(Action::ShowMode, &mut history);
+        app.set_horizontal_viewport_width(4);
+
+        app.dispatch(Action::PageDown, &mut history);
+        assert_eq!(app.show_selected, Some(10));
+        assert_eq!(app.show_explorer_offset, 10);
+        app.dispatch(Action::PageDown, &mut history);
+        assert_eq!(app.show_selected, Some(20));
+        app.dispatch(Action::PageUp, &mut history);
+        assert_eq!(app.show_selected, Some(10));
+        app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.show_explorer_horizontal_offset, 2);
+        assert_eq!(app.show_diff_horizontal_offset, 0);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn show_jumps_to_added_deleted_and_copied_patch_headers() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(ShowData {
+                files: vec![
+                    ChangedFile {
+                        display: "A added.rs".into(),
+                        old_path: None,
+                        new_path: Some("added.rs".into()),
+                    },
+                    ChangedFile {
+                        display: "D deleted.rs".into(),
+                        old_path: Some("deleted.rs".into()),
+                        new_path: None,
+                    },
+                    ChangedFile {
+                        display: "C100 source.rs copy.rs".into(),
+                        old_path: Some("source.rs".into()),
+                        new_path: Some("copy.rs".into()),
+                    },
+                ],
+                diff: vec![
+                    "diff --git a/added.rs b/added.rs".into(),
+                    "diff --git a/deleted.rs b/deleted.rs".into(),
+                    "diff --git a/source.rs b/copy.rs".into(),
+                ],
+                ..ShowData::default()
+            }),
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::ShowMode, &mut history);
+
+        for (selected, offset) in [(0, 0), (1, 1), (2, 2)] {
+            app.show_selected = Some(selected);
+            app.handle_key(Key::Enter, &mut history);
+            assert_eq!(app.show_focus, ShowFocus::Diff);
+            assert_eq!(app.show_diff_offset, offset);
+            app.handle_key(Key::Escape, &mut history);
+        }
+    }
+
+    #[test]
+    fn show_clears_a_stale_missing_patch_status_after_a_valid_jump() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(ShowData {
+                files: vec![
+                    ChangedFile {
+                        display: "M missing.rs".into(),
+                        old_path: Some("missing.rs".into()),
+                        new_path: Some("missing.rs".into()),
+                    },
+                    ChangedFile {
+                        display: "M valid.rs".into(),
+                        old_path: Some("valid.rs".into()),
+                        new_path: Some("valid.rs".into()),
+                    },
+                ],
+                diff: vec!["diff --git a/valid.rs b/valid.rs".into()],
+                ..ShowData::default()
+            }),
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::ShowMode, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        assert!(app.status.contains("Patch location unavailable"));
+        app.handle_key(Key::Escape, &mut history);
+        app.dispatch(Action::MoveDown, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        assert_eq!(app.status, "");
+        assert_eq!(app.show_diff_offset, 0);
+    }
+
+    #[test]
+    fn show_search_is_independent_and_reopening_resets_show_state() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(2),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::ShowMode, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Char('/'), &mut history);
+        for key in "needle".chars().map(Key::Char).chain([Key::Enter]) {
+            app.handle_key(key, &mut history);
+        }
+        assert_eq!(app.show_diff_offset, 3);
+        assert_eq!(app.show_search_query(), Some("needle"));
+        assert_eq!(app.selected, 0);
+        app.show_diff_lines.push("x".repeat(200));
+        app.set_horizontal_viewport_width(4);
+        app.dispatch(Action::ScrollRight, &mut history);
+        assert_eq!(app.show_diff_horizontal_offset, 2);
+        assert_eq!(app.log_horizontal_offset, 0);
+        app.dispatch(Action::SearchNext, &mut history);
+        assert_eq!(app.show_diff_offset, 5);
+        assert_eq!(app.show_selected, Some(1));
+        app.dispatch(Action::SearchNext, &mut history);
+        assert_eq!(app.status, "(END)");
+        app.dispatch(Action::SearchPrevious, &mut history);
+        assert_eq!(app.show_diff_offset, 3);
+        app.dispatch(Action::SearchPrevious, &mut history);
+        assert_eq!(app.status, "(TOP)");
+        app.handle_key(Key::Escape, &mut history);
+        app.handle_key(Key::Escape, &mut history);
+        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::ShowMode, &mut history);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.show_focus, ShowFocus::Explorer);
+        assert_eq!(app.show_selected, Some(0));
+        assert_eq!(app.show_diff_offset, 0);
+        assert_eq!(app.show_diff_horizontal_offset, 0);
+        assert_eq!(app.show_search_query(), None);
+    }
+
+    #[test]
+    fn show_failures_and_empty_commits_leave_a_recoverable_log() {
+        let mut app = App::new(Config::default());
+        let mut failing = ShowHistory {
+            records: records(1),
+            result: Err(GitError::Output("planned show failure".into())),
+        };
+        app.initialize(&mut failing).unwrap();
+        app.dispatch(Action::ShowMode, &mut failing);
+        assert_eq!(app.screen, Screen::Log);
+        assert!(app.status.contains("planned show failure"));
+        assert_eq!(app.selected, 0);
+
+        let mut app = App::new(Config::default());
+        let mut empty = ShowHistory {
+            records: records(1),
+            result: Ok(ShowData {
+                metadata: vec!["commit id-0".into()],
+                ..ShowData::default()
+            }),
+        };
+        app.initialize(&mut empty).unwrap();
+        app.dispatch(Action::ShowMode, &mut empty);
+        app.handle_key(Key::Enter, &mut empty);
+        assert_eq!(app.screen, Screen::Show);
+        assert_eq!(app.show_selected, None);
+        assert_eq!(app.show_focus, ShowFocus::Explorer);
+        app.handle_key(Key::Escape, &mut empty);
+        assert_eq!(app.screen, Screen::Log);
+
+        let mut app = App::new(Config::default());
+        let mut empty_log = ShowHistory {
+            records: Vec::new(),
+            result: Ok(ShowData::default()),
+        };
+        app.initialize(&mut empty_log).unwrap();
+        app.dispatch(Action::ShowMode, &mut empty_log);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.status, "Could not open show: No selected commit");
     }
 }

@@ -50,6 +50,65 @@ fn run_preview(script: &str, config: &str) -> Output {
         .unwrap()
 }
 
+fn run_in(directory: &Path, script: &str, config: &str) -> Output {
+    command()
+        .args([
+            "--config",
+            config_file(config).to_str().unwrap(),
+            "--debug",
+            script,
+        ])
+        .current_dir(directory)
+        .output()
+        .unwrap()
+}
+
+fn git(directory: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?}: {}",
+        arguments,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn show_fixture() -> PathBuf {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "gitlsd-show-fixture-{}-{index}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    git(&directory, &["init", "-q"]);
+    git(&directory, &["config", "user.email", "gitlsd@example.com"]);
+    git(&directory, &["config", "user.name", "gitlsd"]);
+    git(&directory, &["config", "diff.renames", "true"]);
+    fs::write(directory.join("space name.txt"), "base\n").unwrap();
+    fs::write(directory.join("unicode-é.txt"), "base\n").unwrap();
+    fs::write(directory.join("deleted name.txt"), "delete\n").unwrap();
+    fs::write(directory.join("rename source.txt"), "rename\n").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "base"]);
+    fs::write(directory.join("space name.txt"), "changed\n").unwrap();
+    fs::write(directory.join("unicode-é.txt"), "changed\n").unwrap();
+    fs::remove_file(directory.join("deleted name.txt")).unwrap();
+    fs::rename(
+        directory.join("rename source.txt"),
+        directory.join("renamed target.txt"),
+    )
+    .unwrap();
+    fs::write(directory.join("added name.txt"), "added\n").unwrap();
+    git(&directory, &["add", "-A"]);
+    git(&directory, &["commit", "-qm", "variants"]);
+    directory
+}
+
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_gitlsd"));
     command.env("LC_ALL", "C").env("LANG", "C");
@@ -125,6 +184,9 @@ fn help_reflects_effective_configuration_and_quit_is_clean() {
     assert!(help.contains("screen=help\n"));
     assert!(help.contains("setting.log=\"git\" \"log\" \"--oneline\" \"--all\"\n"));
     assert!(help.contains("setting.batch-size=3\n"));
+    assert!(help.contains("setting.show-commit=\"git\" \"show\""));
+    assert!(help.contains("setting.show=\"git\" \"show\""));
+    assert!(help.contains("binding.d=show-mode\n"));
     assert!(help.contains("binding.x=move-down\n"));
 
     let quit = stdout(run(":;q;enter", ""));
@@ -347,4 +409,104 @@ fn preview_command_failure_is_recoverable() {
     ));
     assert!(output.contains("selected=1\n"));
     assert!(output.contains("status=Could not load preview:"));
+}
+
+#[test]
+fn show_opens_full_screen_with_metadata_files_and_all_diff() {
+    let output = stdout(run("d", ""));
+    assert!(output.contains("screen=show\n"));
+    assert!(output.contains("show.focus=explorer\n"));
+    assert!(output.contains("show.selected=0\n"));
+    assert!(output.contains("status=\n"));
+    assert!(output.contains("show.metadata:\n"));
+    assert!(output.contains("show.files:\n"));
+    assert!(output.contains("M src/style/style.ts\n"));
+    assert!(output.contains("show.diff:\n"));
+    assert!(output.contains("diff --git a/src/style/style.ts b/src/style/style.ts"));
+    assert!(output.contains("diff --git a/src/ui/map.ts b/src/ui/map.ts"));
+}
+
+#[test]
+fn show_uses_custom_commands_for_non_head_selection_but_fixed_file_list() {
+    let output = stdout(run(
+        "down;d",
+        "set show-commit git show --format='META %H' --no-patch\nset show git show --format='DIFF %H' --patch\n",
+    ));
+    let selected = "aaed0069a29bd77ca37a12f4477b41eb3fa9572f";
+    assert!(output.contains("screen=show\n"));
+    assert!(output.contains(&format!("commit={selected}\n")));
+    assert!(output.contains(&format!("META {selected}\n")));
+    assert!(output.contains(&format!("DIFF {selected}\n")));
+    assert!(output.contains("show.files:\n"));
+    assert!(output.contains("M CHANGELOG.md\n"));
+}
+
+#[test]
+fn show_real_git_handles_space_and_quoted_paths_without_filtering_the_diff() {
+    let directory = show_fixture();
+    let output = stdout(run_in(&directory, "d", ""));
+    assert!(output.contains("screen=show\n"));
+    assert!(output.contains("M space name.txt\n"));
+    assert!(output.contains("M \"unicode-\\303\\251.txt\"\n"));
+    assert!(output.contains("show.diff:\n"));
+    assert!(output.contains("diff --git a/space name.txt b/space name.txt"));
+    assert!(
+        output.contains("diff --git \"a/unicode-\\303\\251.txt\" \"b/unicode-\\303\\251.txt\"")
+    );
+
+    git(&directory, &["commit", "--allow-empty", "-qm", "empty"]);
+    let empty = stdout(run_in(&directory, "d", ""));
+    assert!(empty.contains("screen=show\n"));
+    assert!(empty.contains("show.selected=\n"));
+    assert!(empty.contains("show.metadata:\n"));
+    assert!(empty.contains("show.files:\n"));
+}
+
+#[test]
+fn show_file_navigation_focus_and_escape_preserve_log_selection() {
+    let output = stdout(run("d;down;enter;down;esc;esc", ""));
+    assert!(output.contains("screen=log\n"));
+    assert!(output.contains("selected=0\n"));
+    assert!(output.contains("commit=446bbe66962e288ae9b2ab8b500b92dfa4da892a\n"));
+    assert!(output.contains("status=\n"));
+}
+
+#[test]
+fn show_diff_scrolling_updates_the_file_explorer_selection() {
+    let output = stdout(run(
+        "d;enter;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down",
+        "",
+    ));
+    assert!(output.contains("screen=show\n"));
+    assert!(output.contains("show.focus=diff\n"));
+    assert!(output.contains("show.selected=2\n"));
+    assert!(output.contains("show.explorer.offset=2\n"));
+    assert!(output.contains("selected=0\n"));
+}
+
+#[test]
+fn show_jump_reports_missing_headers_without_filtering_diff() {
+    let output = stdout(run(
+        "d;down;enter",
+        "set show git show --format='CUSTOM %H' --no-patch\n",
+    ));
+    assert!(output.contains("screen=show\n"));
+    assert!(output.contains("show.focus=diff\n"));
+    assert!(output.contains("status=Patch location unavailable for"));
+    assert!(output.contains("CUSTOM"));
+}
+
+#[test]
+fn show_load_failure_keeps_log_recoverable_and_identifies_stage() {
+    let output = stdout(run("d", "set show-commit git show --not-a-real-option\n"));
+    assert!(output.contains("screen=log\n"));
+    assert!(output.contains("status=Could not load show: Git show metadata failed:"));
+    assert!(output.contains("selected=0\n"));
+}
+
+#[test]
+fn show_diff_failure_is_reported_without_entering_partial_show_mode() {
+    let output = stdout(run("d", "set show git show --not-a-real-option\n"));
+    assert!(output.contains("screen=log\n"));
+    assert!(output.contains("status=Could not load show: Git show diff failed:"));
 }
