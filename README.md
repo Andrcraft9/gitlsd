@@ -1,7 +1,7 @@
 # gitlsd
 
 <p>
-  <img src="logo.png" alt="gitlsd logo" width="180" align="left">
+  <img src="logo.png" alt="gitlsd logo" width="120" align="left">
   <code>gitlsd</code> is a CLI wrapper around git for inspecting and interacting with logs, status, and diffs. It aims to be a modern, minimal, and focused alternative to <code>tig</code>.
 </p>
 <br clear="left">
