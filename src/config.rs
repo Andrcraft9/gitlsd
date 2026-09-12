@@ -1,8 +1,9 @@
 //! Runtime policy and frontend-independent input vocabulary.
 //!
 //! This module owns defaults, configuration discovery and parsing, effective
-//! settings, and the mapping from physical [`Key`] values to application
-//! [`Action`] values.
+//! settings, and the mapping from physical [`Key`] values to domain-grouped
+//! application [`Action`] values. The grouped runtime vocabulary retains the
+//! same user-facing action names for configuration and effective help.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -13,6 +14,15 @@ use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
+    Navigation(NavigationAction),
+    Search(SearchAction),
+    Global(GlobalAction),
+    Preview(PreviewAction),
+    Show(ShowAction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum NavigationAction {
     MoveDown,
     MoveUp,
     PageDown,
@@ -21,39 +31,67 @@ pub enum Action {
     ScrollEnd,
     ScrollRight,
     ScrollLeft,
-    Search,
-    SearchNext,
-    SearchPrevious,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum SearchAction {
+    Start,
+    Next,
+    Previous,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum GlobalAction {
     Command,
     Help,
     Back,
     Quit,
-    TogglePreview,
-    ShowMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PreviewAction {
+    Toggle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ShowAction {
+    Open,
 }
 
 impl Action {
     pub const ALL: [Self; 17] = [
-        Self::MoveDown,
-        Self::MoveUp,
-        Self::PageDown,
-        Self::PageUp,
-        Self::ScrollStart,
-        Self::ScrollEnd,
-        Self::ScrollRight,
-        Self::ScrollLeft,
-        Self::Search,
-        Self::SearchNext,
-        Self::SearchPrevious,
-        Self::Command,
-        Self::Help,
-        Self::Back,
-        Self::Quit,
-        Self::TogglePreview,
-        Self::ShowMode,
+        Self::Navigation(NavigationAction::MoveDown),
+        Self::Navigation(NavigationAction::MoveUp),
+        Self::Navigation(NavigationAction::PageDown),
+        Self::Navigation(NavigationAction::PageUp),
+        Self::Navigation(NavigationAction::ScrollStart),
+        Self::Navigation(NavigationAction::ScrollEnd),
+        Self::Navigation(NavigationAction::ScrollRight),
+        Self::Navigation(NavigationAction::ScrollLeft),
+        Self::Search(SearchAction::Start),
+        Self::Search(SearchAction::Next),
+        Self::Search(SearchAction::Previous),
+        Self::Global(GlobalAction::Command),
+        Self::Global(GlobalAction::Help),
+        Self::Global(GlobalAction::Back),
+        Self::Global(GlobalAction::Quit),
+        Self::Preview(PreviewAction::Toggle),
+        Self::Show(ShowAction::Open),
     ];
 
     pub const fn name(self) -> &'static str {
+        match self {
+            Self::Navigation(action) => action.name(),
+            Self::Search(action) => action.name(),
+            Self::Global(action) => action.name(),
+            Self::Preview(action) => action.name(),
+            Self::Show(action) => action.name(),
+        }
+    }
+}
+
+impl NavigationAction {
+    const fn name(self) -> &'static str {
         match self {
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
@@ -63,15 +101,43 @@ impl Action {
             Self::ScrollEnd => "scroll-end",
             Self::ScrollRight => "scroll-right",
             Self::ScrollLeft => "scroll-left",
-            Self::Search => "search",
-            Self::SearchNext => "search-next",
-            Self::SearchPrevious => "search-previous",
+        }
+    }
+}
+
+impl SearchAction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Start => "search",
+            Self::Next => "search-next",
+            Self::Previous => "search-previous",
+        }
+    }
+}
+
+impl GlobalAction {
+    const fn name(self) -> &'static str {
+        match self {
             Self::Command => "command",
             Self::Help => "help",
             Self::Back => "back",
             Self::Quit => "quit",
-            Self::TogglePreview => "toggle-preview",
-            Self::ShowMode => "show-mode",
+        }
+    }
+}
+
+impl PreviewAction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Toggle => "toggle-preview",
+        }
+    }
+}
+
+impl ShowAction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Open => "show-mode",
         }
     }
 }
@@ -169,26 +235,35 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let bindings = [
-            (Key::Char('j'), Action::MoveDown),
-            (Key::Down, Action::MoveDown),
-            (Key::Char('k'), Action::MoveUp),
-            (Key::Up, Action::MoveUp),
-            (Key::PageDown, Action::PageDown),
-            (Key::PageUp, Action::PageUp),
-            (Key::Home, Action::ScrollStart),
-            (Key::End, Action::ScrollEnd),
-            (Key::Right, Action::ScrollRight),
-            (Key::Left, Action::ScrollLeft),
-            (Key::Char('/'), Action::Search),
-            (Key::Char('n'), Action::SearchNext),
-            (Key::Char('N'), Action::SearchPrevious),
-            (Key::Char(':'), Action::Command),
-            (Key::Char('?'), Action::Help),
-            (Key::Escape, Action::Back),
-            (Key::Char('q'), Action::Quit),
-            (Key::Ctrl('c'), Action::Quit),
-            (Key::Char('p'), Action::TogglePreview),
-            (Key::Char('d'), Action::ShowMode),
+            (
+                Key::Char('j'),
+                Action::Navigation(NavigationAction::MoveDown),
+            ),
+            (Key::Down, Action::Navigation(NavigationAction::MoveDown)),
+            (Key::Char('k'), Action::Navigation(NavigationAction::MoveUp)),
+            (Key::Up, Action::Navigation(NavigationAction::MoveUp)),
+            (
+                Key::PageDown,
+                Action::Navigation(NavigationAction::PageDown),
+            ),
+            (Key::PageUp, Action::Navigation(NavigationAction::PageUp)),
+            (Key::Home, Action::Navigation(NavigationAction::ScrollStart)),
+            (Key::End, Action::Navigation(NavigationAction::ScrollEnd)),
+            (
+                Key::Right,
+                Action::Navigation(NavigationAction::ScrollRight),
+            ),
+            (Key::Left, Action::Navigation(NavigationAction::ScrollLeft)),
+            (Key::Char('/'), Action::Search(SearchAction::Start)),
+            (Key::Char('n'), Action::Search(SearchAction::Next)),
+            (Key::Char('N'), Action::Search(SearchAction::Previous)),
+            (Key::Char(':'), Action::Global(GlobalAction::Command)),
+            (Key::Char('?'), Action::Global(GlobalAction::Help)),
+            (Key::Escape, Action::Global(GlobalAction::Back)),
+            (Key::Char('q'), Action::Global(GlobalAction::Quit)),
+            (Key::Ctrl('c'), Action::Global(GlobalAction::Quit)),
+            (Key::Char('p'), Action::Preview(PreviewAction::Toggle)),
+            (Key::Char('d'), Action::Show(ShowAction::Open)),
         ]
         .into_iter()
         .collect();
@@ -660,9 +735,18 @@ mod tests {
             ]
         );
         assert_eq!(config.batch_size, 7);
-        assert_eq!(config.action_for(&Key::Char('x')), Some(Action::MoveDown));
-        assert_eq!(config.action_for(&Key::Char('=')), Some(Action::Quit));
-        assert_eq!(config.action_for(&Key::Char(';')), Some(Action::Help));
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::Navigation(NavigationAction::MoveDown))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('=')),
+            Some(Action::Global(GlobalAction::Quit))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char(';')),
+            Some(Action::Global(GlobalAction::Help))
+        );
         assert_eq!(
             config.help_lines()[0],
             "setting.log=\"git\" \"log\" \"--oneline\" \"--all\" \"--author\" \"Grace Hopper\" \"\" \"=\""
@@ -682,8 +766,14 @@ mod tests {
             ["git", "show", "--format=%H", "--no-patch"]
         );
         assert_eq!(config.show_command, ["git", "show", "--patch", "--format="]);
-        assert_eq!(config.action_for(&Key::Char('d')), Some(Action::ShowMode));
-        assert_eq!(config.action_for(&Key::Char('x')), Some(Action::ShowMode));
+        assert_eq!(
+            config.action_for(&Key::Char('d')),
+            Some(Action::Show(ShowAction::Open))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::Show(ShowAction::Open))
+        );
         assert!(config.help_lines().contains(
             &"setting.show-commit=\"git\" \"show\" \"--format=%H\" \"--no-patch\"".into()
         ));
@@ -701,15 +791,30 @@ mod tests {
             Path::new("sample.conf"),
         )
         .unwrap();
-        assert_eq!(config.action_for(&Key::Right), Some(Action::ScrollRight));
-        assert_eq!(config.action_for(&Key::Left), Some(Action::ScrollLeft));
-        assert_eq!(config.action_for(&Key::Home), Some(Action::ScrollStart));
-        assert_eq!(config.action_for(&Key::End), Some(Action::ScrollEnd));
+        assert_eq!(
+            config.action_for(&Key::Right),
+            Some(Action::Navigation(NavigationAction::ScrollRight))
+        );
+        assert_eq!(
+            config.action_for(&Key::Left),
+            Some(Action::Navigation(NavigationAction::ScrollLeft))
+        );
+        assert_eq!(
+            config.action_for(&Key::Home),
+            Some(Action::Navigation(NavigationAction::ScrollStart))
+        );
+        assert_eq!(
+            config.action_for(&Key::End),
+            Some(Action::Navigation(NavigationAction::ScrollEnd))
+        );
         assert_eq!(
             config.action_for(&Key::Char('x')),
-            Some(Action::ScrollRight)
+            Some(Action::Navigation(NavigationAction::ScrollRight))
         );
-        assert_eq!(config.action_for(&Key::Char('y')), Some(Action::ScrollLeft));
+        assert_eq!(
+            config.action_for(&Key::Char('y')),
+            Some(Action::Navigation(NavigationAction::ScrollLeft))
+        );
         assert!(
             config
                 .help_lines()
@@ -720,6 +825,35 @@ mod tests {
                 .help_lines()
                 .contains(&"binding.right=scroll-right".into())
         );
+    }
+
+    #[test]
+    fn grouped_actions_keep_the_configured_action_names() {
+        let names = [
+            "move-down",
+            "move-up",
+            "page-down",
+            "page-up",
+            "scroll-start",
+            "scroll-end",
+            "scroll-right",
+            "scroll-left",
+            "search",
+            "search-next",
+            "search-previous",
+            "command",
+            "help",
+            "back",
+            "quit",
+            "toggle-preview",
+            "show-mode",
+        ];
+
+        assert_eq!(Action::ALL.len(), names.len());
+        for (action, name) in Action::ALL.into_iter().zip(names) {
+            assert_eq!(action.name(), name);
+            assert_eq!(name.parse::<Action>(), Ok(action));
+        }
     }
 
     #[test]

@@ -164,6 +164,8 @@ pub fn snapshot(app: &App) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::config::Config;
     use crate::git::{CommitRecord, GitError, HistorySource};
 
@@ -208,10 +210,7 @@ mod tests {
 
     #[test]
     fn named_semicolon_key_is_scriptable() {
-        let mut config = Config::default();
-        config
-            .bindings
-            .insert(Key::Char(';'), crate::config::Action::Quit);
+        let config = Config::parse("bind semicolon quit\n", Path::new("debug.conf")).unwrap();
         let mut app = App::new(config);
         let snapshot = run_script(&mut app, &mut Empty, "semicolon").unwrap();
         assert!(snapshot.contains("running=false\n"));

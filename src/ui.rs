@@ -576,7 +576,9 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
 mod tests {
     use ratatui::backend::TestBackend;
 
-    use crate::config::{Action, Config, Key};
+    use crate::config::{
+        Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, ShowAction,
+    };
     use crate::git::{ChangedFile, CommitRecord, GitError, HistorySource, ShowData};
 
     use super::*;
@@ -724,7 +726,7 @@ mod tests {
             Vec::new(),
             show_data(),
         );
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         for area in [
             ratatui::layout::Rect::new(0, 0, 201, 101),
             ratatui::layout::Rect::new(0, 0, 40, 101),
@@ -758,7 +760,7 @@ mod tests {
             Vec::new(),
             ShowData::default(),
         );
-        app.dispatch(Action::TogglePreview, &mut history);
+        app.dispatch(Action::Preview(PreviewAction::Toggle), &mut history);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
@@ -792,9 +794,12 @@ mod tests {
             Vec::new(),
             ShowData::default(),
         );
-        app.dispatch(Action::TogglePreview, &mut history);
+        app.dispatch(Action::Preview(PreviewAction::Toggle), &mut history);
         app.set_horizontal_viewport_width("visible-content".len());
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
         terminal
@@ -816,9 +821,12 @@ mod tests {
             Vec::new(),
             ShowData::default(),
         );
-        app.dispatch(Action::TogglePreview, &mut history);
+        app.dispatch(Action::Preview(PreviewAction::Toggle), &mut history);
         app.set_horizontal_viewport_width(8);
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
         terminal
@@ -912,7 +920,10 @@ mod tests {
         );
         app.handle_key(Key::Enter, &mut history);
         app.set_horizontal_viewport_width("preview content".len());
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         let mut log_state = ListState::default();
         for (width, height, direction) in [
             (80, 10, Direction::Horizontal),
@@ -956,7 +967,7 @@ mod tests {
             Vec::new(),
             show,
         );
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         let mut log_state = ListState::default();
         for (width, height, direction) in [
             (80, 10, Direction::Horizontal),
@@ -1035,9 +1046,12 @@ mod tests {
             Vec::new(),
             show,
         );
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.set_horizontal_viewport_width("metadata".len());
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal
@@ -1058,10 +1072,10 @@ mod tests {
             .collect();
         let (mut app, mut history) = app_with_history(records, Vec::new(), ShowData::default());
         for _ in 0..4 {
-            app.dispatch(Action::MoveDown, &mut history);
+            app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         }
-        app.dispatch(Action::Help, &mut history);
-        app.dispatch(Action::PageDown, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
         assert_eq!(app.log_state().selected(), 4);
 
         let mut log_state = ListState::default();
@@ -1079,10 +1093,13 @@ mod tests {
     #[test]
     fn renders_help_at_horizontal_offset() {
         let (mut app, mut history) = app_with_history(Vec::new(), Vec::new(), ShowData::default());
-        app.dispatch(Action::Help, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
         app.set_horizontal_viewport_width(2);
         for _ in 0.."setting.".len() {
-            app.dispatch(Action::ScrollRight, &mut history);
+            app.dispatch(
+                Action::Navigation(NavigationAction::ScrollRight),
+                &mut history,
+            );
         }
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
@@ -1109,7 +1126,7 @@ mod tests {
             let mut log_state = ListState::default();
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for _ in 0..18 {
-                app.dispatch(Action::MoveDown, &mut history);
+                app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
             }
             terminal
                 .draw(|frame| render(frame, &app, &mut log_state))
@@ -1117,20 +1134,20 @@ mod tests {
             let bottom_offset = log_state.offset();
             assert!(bottom_offset > 0);
 
-            app.dispatch(Action::MoveUp, &mut history);
+            app.dispatch(Action::Navigation(NavigationAction::MoveUp), &mut history);
             terminal
                 .draw(|frame| render(frame, &app, &mut log_state))
                 .unwrap();
             assert_eq!(log_state.offset(), bottom_offset);
 
             while app.log_state().selected() > log_state.offset() {
-                app.dispatch(Action::MoveUp, &mut history);
+                app.dispatch(Action::Navigation(NavigationAction::MoveUp), &mut history);
                 terminal
                     .draw(|frame| render(frame, &app, &mut log_state))
                     .unwrap();
             }
             let top_offset = log_state.offset();
-            app.dispatch(Action::MoveUp, &mut history);
+            app.dispatch(Action::Navigation(NavigationAction::MoveUp), &mut history);
             terminal
                 .draw(|frame| render(frame, &app, &mut log_state))
                 .unwrap();

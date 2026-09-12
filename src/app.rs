@@ -1,18 +1,13 @@
 //! Application state machine and behavior.
 //!
 //! [`App`] owns persistent log state plus enum-scoped help and show state,
-//! input modes, commands, and shutdown intent. It works through
-//! [`HistorySource`] and has no dependency on terminal libraries or concrete
-//! process execution.
-//!
-//! Frontends drive it through intent methods and consume read-only state accessors.
-//!
-//! Action routing is delegated to the focused preview, show, or help screen before
-//! falling back to log/global actions.
+//! input modes, commands, and shutdown intent.
 
 use std::collections::HashSet;
 
-use crate::config::{Action, Config, Key};
+use crate::config::{
+    Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, SearchAction, ShowAction,
+};
 use crate::git::{
     ChangedFile, CommitRecord, GitError, HistorySource, file_at_patch_offset, patch_offset,
 };
@@ -60,6 +55,14 @@ impl Screen {
 pub enum ShowFocus {
     Explorer,
     Diff,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivePane {
+    Log,
+    Preview,
+    Help,
+    Show(ShowFocus),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -255,8 +258,10 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: Key, source: &mut impl HistorySource) {
-        if matches!(key, Key::Ctrl(_)) && self.config.action_for(&key) == Some(Action::Quit) {
-            self.dispatch(Action::Quit, source);
+        if matches!(key, Key::Ctrl(_))
+            && self.config.action_for(&key) == Some(Action::Global(GlobalAction::Quit))
+        {
+            self.dispatch(Action::Global(GlobalAction::Quit), source);
             return;
         }
         match &mut self.input {
@@ -336,165 +341,107 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
-        if Self::is_global_action(action) {
-            self.dispatch_log(action, source);
-            return;
+        match action {
+            Action::Navigation(action) => self.dispatch_navigation(action, source),
+            Action::Search(action) => self.dispatch_search(action, source),
+            Action::Global(action) => self.dispatch_global(action),
+            Action::Preview(action) => self.dispatch_preview_action(action, source),
+            Action::Show(action) => self.dispatch_show_action(action, source),
         }
-
-        if self.dispatch_preview(action) {
-            return;
-        }
-
-        if self.dispatch_show(action) {
-            return;
-        }
-
-        if self.dispatch_help(action) {
-            return;
-        }
-
-        self.dispatch_log(action, source);
     }
 
-    fn dispatch_preview(&mut self, action: Action) -> bool {
-        if !self.log.preview_focused || !matches!(self.screen, Screen::Log) {
-            return false;
+    fn dispatch_navigation(&mut self, action: NavigationAction, source: &mut impl HistorySource) {
+        match self.active_pane() {
+            ActivePane::Preview => self.dispatch_preview_navigation(action),
+            ActivePane::Show(focus) => self.dispatch_show_navigation(action, focus),
+            ActivePane::Help => self.dispatch_help_navigation(action),
+            ActivePane::Log => self.dispatch_log_navigation(action, source),
         }
+    }
 
+    fn dispatch_preview_navigation(&mut self, action: NavigationAction) {
         match action {
-            Action::MoveDown => {
+            NavigationAction::MoveDown => {
                 self.log.preview_offset = (self.log.preview_offset + 1)
                     .min(self.log.preview_lines.len().saturating_sub(1));
             }
-            Action::MoveUp => {
+            NavigationAction::MoveUp => {
                 self.log.preview_offset = self.log.preview_offset.saturating_sub(1);
             }
-            Action::PageDown => {
+            NavigationAction::PageDown => {
                 self.log.preview_offset = (self.log.preview_offset + 10)
                     .min(self.log.preview_lines.len().saturating_sub(1));
             }
-            Action::PageUp => {
+            NavigationAction::PageUp => {
                 self.log.preview_offset = self.log.preview_offset.saturating_sub(10);
             }
-            Action::ScrollRight | Action::ScrollLeft | Action::ScrollStart | Action::ScrollEnd => {
-                self.scroll_horizontal(action)
-            }
-            Action::Search => {
-                self.input = InputMode::Search(String::new());
-            }
-            Action::SearchNext => self.repeat_preview_search(true),
-            Action::SearchPrevious => self.repeat_preview_search(false),
-            Action::Back => {
-                self.log.preview_focused = false;
-                self.input = InputMode::Normal;
-            }
-            Action::Command | Action::Help => {}
-            _ => unreachable!("global actions are routed before screen dispatch"),
+            NavigationAction::ScrollRight
+            | NavigationAction::ScrollLeft
+            | NavigationAction::ScrollStart
+            | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
         }
-
-        true
     }
 
-    fn dispatch_show(&mut self, action: Action) -> bool {
-        let Some(focus) = self.screen.show().map(|state| state.show_focus) else {
-            return false;
-        };
-
+    fn dispatch_show_navigation(&mut self, action: NavigationAction, focus: ShowFocus) {
         match focus {
             ShowFocus::Explorer => match action {
-                Action::MoveDown => self.move_show_down(),
-                Action::MoveUp => self.move_show_up(),
-                Action::PageDown => self.page_show_down(),
-                Action::PageUp => self.page_show_up(),
-                Action::ScrollRight
-                | Action::ScrollLeft
-                | Action::ScrollStart
-                | Action::ScrollEnd => self.scroll_horizontal(action),
-                Action::Search => {
-                    self.status = "Focus the show diff to search".into();
-                }
-                Action::Back => {
-                    self.screen = Screen::Log;
-                    self.input = InputMode::Normal;
-                    self.status.clear();
-                }
-                Action::SearchNext | Action::SearchPrevious | Action::Command | Action::Help => {}
-                _ => unreachable!("global actions are routed before screen dispatch"),
+                NavigationAction::MoveDown => self.move_show_down(),
+                NavigationAction::MoveUp => self.move_show_up(),
+                NavigationAction::PageDown => self.page_show_down(),
+                NavigationAction::PageUp => self.page_show_up(),
+                NavigationAction::ScrollRight
+                | NavigationAction::ScrollLeft
+                | NavigationAction::ScrollStart
+                | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
             ShowFocus::Diff => match action {
-                Action::MoveDown => self.move_show_diff(1, true),
-                Action::MoveUp => self.move_show_diff(1, false),
-                Action::PageDown => self.move_show_diff(10, true),
-                Action::PageUp => self.move_show_diff(10, false),
-                Action::ScrollRight
-                | Action::ScrollLeft
-                | Action::ScrollStart
-                | Action::ScrollEnd => self.scroll_horizontal(action),
-                Action::Search => self.input = InputMode::Search(String::new()),
-                Action::SearchNext => self.repeat_show_search(true),
-                Action::SearchPrevious => self.repeat_show_search(false),
-                Action::Back => {
-                    self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
-                    self.input = InputMode::Normal;
-                }
-                Action::Command | Action::Help => {}
-                _ => unreachable!("global actions are routed before screen dispatch"),
+                NavigationAction::MoveDown => self.move_show_diff(1, true),
+                NavigationAction::MoveUp => self.move_show_diff(1, false),
+                NavigationAction::PageDown => self.move_show_diff(10, true),
+                NavigationAction::PageUp => self.move_show_diff(10, false),
+                NavigationAction::ScrollRight
+                | NavigationAction::ScrollLeft
+                | NavigationAction::ScrollStart
+                | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
         }
-
-        true
     }
 
-    fn dispatch_help(&mut self, action: Action) -> bool {
-        if !matches!(self.screen, Screen::Help(_)) {
-            return false;
-        }
-
+    fn dispatch_help_navigation(&mut self, action: NavigationAction) {
         let last_line = self.config.help_lines().len().saturating_sub(1);
         match action {
-            Action::MoveDown => {
+            NavigationAction::MoveDown => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = (help.offset + 1).min(last_line);
             }
-            Action::MoveUp => {
+            NavigationAction::MoveUp => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = help.offset.saturating_sub(1);
             }
-            Action::PageDown => {
+            NavigationAction::PageDown => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = (help.offset + 10).min(last_line);
             }
-            Action::PageUp => {
+            NavigationAction::PageUp => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = help.offset.saturating_sub(10);
             }
-            Action::ScrollRight | Action::ScrollLeft | Action::ScrollStart | Action::ScrollEnd => {
-                self.scroll_horizontal(action)
-            }
-            Action::Search
-            | Action::SearchNext
-            | Action::SearchPrevious
-            | Action::Command
-            | Action::Help
-            | Action::Back => return false,
-            _ => unreachable!("global actions are routed before screen dispatch"),
+            NavigationAction::ScrollRight
+            | NavigationAction::ScrollLeft
+            | NavigationAction::ScrollStart
+            | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
         }
-
-        true
     }
 
-    fn is_global_action(action: Action) -> bool {
-        matches!(
-            action,
-            Action::Quit | Action::TogglePreview | Action::ShowMode
-        )
-    }
-
-    fn dispatch_log(&mut self, action: Action, source: &mut impl HistorySource) {
+    fn dispatch_log_navigation(
+        &mut self,
+        action: NavigationAction,
+        source: &mut impl HistorySource,
+    ) {
         match action {
-            Action::MoveDown => self.move_down(source),
-            Action::MoveUp => self.move_up(source),
-            Action::PageDown => {
+            NavigationAction::MoveDown => self.move_down(source),
+            NavigationAction::MoveUp => self.move_up(source),
+            NavigationAction::PageDown => {
                 let preview_visible = self.log.preview_visible;
                 self.log.preview_visible = false;
                 for _ in 0..10 {
@@ -509,47 +456,138 @@ impl App {
                     self.reload_preview(source);
                 }
             }
-            Action::PageUp => {
+            NavigationAction::PageUp => {
                 let before = self.log.selected;
                 self.log.selected = self.log.selected.saturating_sub(10);
                 if self.log.selected != before {
                     self.reload_preview(source);
                 }
             }
-            Action::ScrollRight => self.scroll_horizontal(action),
-            Action::ScrollLeft => self.scroll_horizontal(action),
-            Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
-            Action::Search => {
+            NavigationAction::ScrollRight
+            | NavigationAction::ScrollLeft
+            | NavigationAction::ScrollStart
+            | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
+        }
+    }
+
+    fn dispatch_search(&mut self, action: SearchAction, source: &mut impl HistorySource) {
+        match self.active_pane() {
+            ActivePane::Preview => self.dispatch_preview_search(action),
+            ActivePane::Show(focus) => self.dispatch_show_search(action, focus),
+            ActivePane::Help | ActivePane::Log => self.dispatch_log_search(action, source),
+        }
+    }
+
+    fn dispatch_preview_search(&mut self, action: SearchAction) {
+        match action {
+            SearchAction::Start => self.input = InputMode::Search(String::new()),
+            SearchAction::Next => self.repeat_preview_search(true),
+            SearchAction::Previous => self.repeat_preview_search(false),
+        }
+    }
+
+    fn dispatch_show_search(&mut self, action: SearchAction, focus: ShowFocus) {
+        match (focus, action) {
+            (ShowFocus::Explorer, SearchAction::Start) => {
+                self.status = "Focus the show diff to search".into();
+            }
+            (ShowFocus::Explorer, SearchAction::Next | SearchAction::Previous) => {}
+            (ShowFocus::Diff, SearchAction::Start) => {
+                self.input = InputMode::Search(String::new());
+            }
+            (ShowFocus::Diff, SearchAction::Next) => self.repeat_show_search(true),
+            (ShowFocus::Diff, SearchAction::Previous) => self.repeat_show_search(false),
+        }
+    }
+
+    fn dispatch_log_search(&mut self, action: SearchAction, source: &mut impl HistorySource) {
+        match action {
+            SearchAction::Start => {
                 self.screen = Screen::Log;
                 self.input = InputMode::Search(String::new());
             }
-            Action::SearchNext => self.repeat_search(true, source),
-            Action::SearchPrevious => self.repeat_search(false, source),
-            Action::Command => self.input = InputMode::Command(String::new()),
-            Action::Help => {
+            SearchAction::Next => self.repeat_search(true, source),
+            SearchAction::Previous => self.repeat_search(false, source),
+        }
+    }
+
+    fn dispatch_global(&mut self, action: GlobalAction) {
+        match action {
+            GlobalAction::Command => {
+                if matches!(
+                    self.active_pane(),
+                    ActivePane::Preview | ActivePane::Show(_)
+                ) {
+                    return;
+                }
+                self.input = InputMode::Command(String::new());
+            }
+            GlobalAction::Help => {
+                if matches!(
+                    self.active_pane(),
+                    ActivePane::Preview | ActivePane::Show(_)
+                ) {
+                    return;
+                }
                 self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
-            Action::Back => {
-                self.screen = Screen::Log;
-                self.input = InputMode::Normal;
-            }
-            Action::TogglePreview => {
-                self.log.preview_visible = !self.log.preview_visible;
-                self.log.preview_focused = false;
-                if self.log.preview_visible {
-                    self.reload_preview(source);
+            GlobalAction::Back => match self.active_pane() {
+                ActivePane::Preview => {
+                    self.log.preview_focused = false;
+                    self.input = InputMode::Normal;
                 }
-            }
-            Action::ShowMode => self.open_show(source),
-            Action::Quit => {
+                ActivePane::Show(ShowFocus::Explorer) => {
+                    self.screen = Screen::Log;
+                    self.input = InputMode::Normal;
+                    self.status.clear();
+                }
+                ActivePane::Show(ShowFocus::Diff) => {
+                    self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
+                    self.input = InputMode::Normal;
+                }
+                ActivePane::Help | ActivePane::Log => {
+                    self.screen = Screen::Log;
+                    self.input = InputMode::Normal;
+                }
+            },
+            GlobalAction::Quit => {
                 self.running = false;
                 self.status = "Quit requested".into();
             }
         }
     }
 
-    fn scroll_horizontal(&mut self, action: Action) {
+    fn active_pane(&self) -> ActivePane {
+        if self.log.preview_focused && matches!(self.screen, Screen::Log) {
+            return ActivePane::Preview;
+        }
+        match &self.screen {
+            Screen::Log => ActivePane::Log,
+            Screen::Help(_) => ActivePane::Help,
+            Screen::Show(show) => ActivePane::Show(show.show_focus),
+        }
+    }
+
+    fn dispatch_preview_action(&mut self, action: PreviewAction, source: &mut impl HistorySource) {
+        match action {
+            PreviewAction::Toggle => {
+                self.log.preview_visible = !self.log.preview_visible;
+                self.log.preview_focused = false;
+                if self.log.preview_visible {
+                    self.reload_preview(source);
+                }
+            }
+        }
+    }
+
+    fn dispatch_show_action(&mut self, action: ShowAction, source: &mut impl HistorySource) {
+        match action {
+            ShowAction::Open => self.open_show(source),
+        }
+    }
+
+    fn scroll_horizontal(&mut self, action: NavigationAction) {
         let maximum = self.max_horizontal_offset();
         let step = (self.horizontal_viewport_width / 2).max(1);
         let offset = if self.log.preview_focused && matches!(self.screen, Screen::Log) {
@@ -565,10 +603,10 @@ impl App {
             }
         };
         *offset = match action {
-            Action::ScrollStart => 0,
-            Action::ScrollEnd => maximum,
-            Action::ScrollLeft => offset.saturating_sub(step),
-            Action::ScrollRight => offset.saturating_add(step).min(maximum),
+            NavigationAction::ScrollStart => 0,
+            NavigationAction::ScrollEnd => maximum,
+            NavigationAction::ScrollLeft => offset.saturating_sub(step),
+            NavigationAction::ScrollRight => offset.saturating_add(step).min(maximum),
             _ => *offset,
         };
     }
@@ -1128,7 +1166,7 @@ mod tests {
             fail_at: None,
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.records.len(), 4);
         assert_eq!(
             app.log
@@ -1153,7 +1191,7 @@ mod tests {
             fail_at: None,
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.selected, 1);
         assert_eq!(app.log.records.len(), 2);
     }
@@ -1170,7 +1208,7 @@ mod tests {
             fail_at: Some(2),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.records.len(), 2);
         assert!(app.status.contains("planned failure"));
     }
@@ -1187,7 +1225,7 @@ mod tests {
             fail_at: None,
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.records.len(), 2);
         assert!(!app.log.has_more);
     }
@@ -1268,18 +1306,34 @@ mod tests {
         app.log.preview_offset = 1;
         app.log.preview_horizontal_offset = 2;
         let log_before = app.log.clone();
-        app.dispatch(Action::Help, &mut history);
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.screen.help().unwrap().offset, 1);
         assert_eq!(app.log.selected, 1);
-        app.dispatch(Action::PageDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
         assert!(app.screen.help().unwrap().offset > 1);
         assert_eq!(app.log.selected, 1);
-        app.dispatch(Action::PageUp, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageUp), &mut history);
         assert_eq!(app.screen.help().unwrap().offset, 1);
-        app.dispatch(Action::Back, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Back), &mut history);
         assert_eq!(app.screen, Screen::Log);
         assert_eq!(app.log, log_before);
+    }
+
+    #[test]
+    fn search_from_help_keeps_the_existing_log_fallback() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(1),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
+        app.dispatch(Action::Search(SearchAction::Start), &mut history);
+
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.input_label(), Some("/".into()));
     }
 
     #[test]
@@ -1293,28 +1347,55 @@ mod tests {
         app.log.selected = 1;
         app.set_horizontal_viewport_width(4);
 
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 2);
-        app.dispatch(Action::ScrollRight, &mut history);
-        app.dispatch(Action::ScrollLeft, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollLeft),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 2);
         assert_eq!(app.log.selected, 1);
 
-        app.dispatch(Action::Help, &mut history);
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.screen.help().unwrap().horizontal_offset, 2);
-        app.dispatch(Action::ScrollLeft, &mut history);
-        app.dispatch(Action::ScrollLeft, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollLeft),
+            &mut history,
+        );
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollLeft),
+            &mut history,
+        );
         assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
         assert_eq!(app.log.selected, 1);
 
-        app.dispatch(Action::Back, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Back), &mut history);
         app.handle_key(Key::Enter, &mut history);
         app.log.preview_lines = vec!["abcdef".into()];
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.log.preview_horizontal_offset, 2);
-        app.dispatch(Action::ScrollRight, &mut history);
-        app.dispatch(Action::ScrollLeft, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollLeft),
+            &mut history,
+        );
         assert_eq!(app.log.preview_horizontal_offset, 0);
         assert_eq!(app.log.preview_offset, 0);
         assert_eq!(app.log.selected, 1);
@@ -1333,25 +1414,43 @@ mod tests {
         app.initialize(&mut history).unwrap();
         app.set_horizontal_viewport_width(3);
 
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 3);
-        app.dispatch(Action::ScrollStart, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollStart),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 0);
 
-        app.dispatch(Action::Help, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
         app.set_horizontal_viewport_width(8);
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         assert!(app.screen.help().unwrap().horizontal_offset > 0);
-        app.dispatch(Action::ScrollStart, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollStart),
+            &mut history,
+        );
         assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
 
-        app.dispatch(Action::Back, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Back), &mut history);
         app.handle_key(Key::Enter, &mut history);
         app.log.preview_lines = vec!["abcdef".into()];
         app.set_horizontal_viewport_width(3);
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         assert_eq!(app.log.preview_horizontal_offset, 3);
-        app.dispatch(Action::ScrollStart, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollStart),
+            &mut history,
+        );
         assert_eq!(app.log.preview_horizontal_offset, 0);
     }
 
@@ -1368,11 +1467,20 @@ mod tests {
         app.initialize(&mut history).unwrap();
         app.set_horizontal_viewport_width(10);
 
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 5);
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 10);
-        app.dispatch(Action::ScrollLeft, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollLeft),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 5);
     }
 
@@ -1388,7 +1496,10 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.set_horizontal_viewport_width(2);
-        app.dispatch(Action::ScrollEnd, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollEnd),
+            &mut history,
+        );
         assert_eq!(app.log.log_horizontal_offset, 4);
     }
 
@@ -1401,14 +1512,14 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.log.preview_horizontal_offset = 4;
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.preview_horizontal_offset, 0);
 
         app.screen = Screen::Help(HelpState {
             horizontal_offset: 4,
             ..HelpState::default()
         });
-        app.dispatch(Action::Help, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
         assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
     }
 
@@ -1438,7 +1549,7 @@ mod tests {
         let mut app = App::new(config);
         let mut history = OverlappingHistory;
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(
             app.log
                 .records
@@ -1478,7 +1589,7 @@ mod tests {
         assert_eq!(app.log.preview_lines[0], "id-0 first");
 
         app.handle_key(Key::Enter, &mut history);
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert!(app.log.preview_focused);
         assert_eq!(app.log.preview_offset, 1);
         assert_eq!(app.log.selected, 0);
@@ -1488,8 +1599,8 @@ mod tests {
             app.handle_key(key, &mut history);
         }
         assert_eq!(app.log.preview_offset, 1);
-        app.dispatch(Action::Back, &mut history);
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Back), &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert!(!app.log.preview_focused);
         assert_eq!(app.log.selected, 1);
         assert_eq!(app.log.preview_offset, 0);
@@ -1622,7 +1733,7 @@ mod tests {
         let mut history = FailingPreview;
         app.initialize(&mut history).unwrap();
         assert!(app.status.contains("planned preview failure"));
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.log.selected, 1);
     }
 
@@ -1635,7 +1746,7 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.handle_key(Key::Enter, &mut history);
-        app.dispatch(Action::TogglePreview, &mut history);
+        app.dispatch(Action::Preview(PreviewAction::Toggle), &mut history);
         assert!(!app.log.preview_visible);
         assert!(!app.log.preview_focused);
         app.log.preview_visible = true;
@@ -1644,7 +1755,7 @@ mod tests {
         assert!(!app.log.preview_focused);
         app.screen = Screen::Log;
         app.log.preview_focused = true;
-        app.dispatch(Action::Quit, &mut history);
+        app.dispatch(Action::Global(GlobalAction::Quit), &mut history);
         assert!(!app.running);
     }
 
@@ -1657,7 +1768,7 @@ mod tests {
         };
         preview_app.initialize(&mut preview_history).unwrap();
         preview_app.handle_key(Key::Enter, &mut preview_history);
-        preview_app.dispatch(Action::ShowMode, &mut preview_history);
+        preview_app.dispatch(Action::Show(ShowAction::Open), &mut preview_history);
         assert!(matches!(preview_app.screen, Screen::Show(_)));
 
         let mut show_app = App::new(Config::default());
@@ -1666,13 +1777,13 @@ mod tests {
             result: Ok(show_data()),
         };
         show_app.initialize(&mut show_history).unwrap();
-        show_app.dispatch(Action::ShowMode, &mut show_history);
-        show_app.dispatch(Action::TogglePreview, &mut show_history);
+        show_app.dispatch(Action::Show(ShowAction::Open), &mut show_history);
+        show_app.dispatch(Action::Preview(PreviewAction::Toggle), &mut show_history);
         assert!(!show_app.log.preview_visible);
         assert!(matches!(show_app.screen, Screen::Show(_)));
-        show_app.dispatch(Action::ShowMode, &mut show_history);
+        show_app.dispatch(Action::Show(ShowAction::Open), &mut show_history);
         assert!(matches!(show_app.screen, Screen::Show(_)));
-        show_app.dispatch(Action::Quit, &mut show_history);
+        show_app.dispatch(Action::Global(GlobalAction::Quit), &mut show_history);
         assert!(!show_app.running);
 
         let mut help_app = App::new(Config::default());
@@ -1681,11 +1792,11 @@ mod tests {
             result: Ok(show_data()),
         };
         help_app.initialize(&mut help_history).unwrap();
-        help_app.dispatch(Action::Help, &mut help_history);
-        help_app.dispatch(Action::TogglePreview, &mut help_history);
+        help_app.dispatch(Action::Global(GlobalAction::Help), &mut help_history);
+        help_app.dispatch(Action::Preview(PreviewAction::Toggle), &mut help_history);
         assert!(!help_app.log.preview_visible);
         assert!(matches!(help_app.screen, Screen::Help(_)));
-        help_app.dispatch(Action::Quit, &mut help_history);
+        help_app.dispatch(Action::Global(GlobalAction::Quit), &mut help_history);
         assert!(!help_app.running);
 
         let mut help_show_app = App::new(Config::default());
@@ -1694,8 +1805,8 @@ mod tests {
             result: Ok(show_data()),
         };
         help_show_app.initialize(&mut help_show_history).unwrap();
-        help_show_app.dispatch(Action::Help, &mut help_show_history);
-        help_show_app.dispatch(Action::ShowMode, &mut help_show_history);
+        help_show_app.dispatch(Action::Global(GlobalAction::Help), &mut help_show_history);
+        help_show_app.dispatch(Action::Show(ShowAction::Open), &mut help_show_history);
         assert!(matches!(help_show_app.screen, Screen::Show(_)));
     }
 
@@ -1711,7 +1822,7 @@ mod tests {
         app.log.preview_offset = 1;
         app.log.preview_horizontal_offset = 2;
         let log_before = app.log.clone();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
 
         assert!(matches!(app.screen, Screen::Show(_)));
         assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
@@ -1719,14 +1830,14 @@ mod tests {
         assert_eq!(app.log.selected, 1);
         assert_eq!(app.status, "");
 
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
         assert_eq!(app.log.selected, 1);
         app.handle_key(Key::Enter, &mut history);
         assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Diff);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 4);
 
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
         assert_eq!(app.log.selected, 1);
         app.handle_key(Key::Escape, &mut history);
@@ -1747,19 +1858,19 @@ mod tests {
             result: Ok(show_data()),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.handle_key(Key::Enter, &mut history);
 
         for _ in 0..3 {
-            app.dispatch(Action::MoveDown, &mut history);
+            app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         }
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 4);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
 
-        app.dispatch(Action::MoveUp, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveUp), &mut history);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(0));
-        app.dispatch(Action::PageDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
     }
@@ -1772,7 +1883,7 @@ mod tests {
             result: Ok(show_data()),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.handle_key(Key::Enter, &mut history);
         app.handle_key(Key::Char('/'), &mut history);
         for key in "other".chars().map(Key::Char).chain([Key::Enter]) {
@@ -1799,17 +1910,20 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.log.selected = 1;
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.set_horizontal_viewport_width(4);
 
-        app.dispatch(Action::PageDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(10));
         assert_eq!(app.screen.show().unwrap().show_explorer_offset, 10);
-        app.dispatch(Action::PageDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(20));
-        app.dispatch(Action::PageUp, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::PageUp), &mut history);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(10));
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(
             app.screen.show().unwrap().show_explorer_horizontal_offset,
             2
@@ -1850,7 +1964,7 @@ mod tests {
             }),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
 
         for (selected, offset) in [(0, 0), (1, 1), (2, 2)] {
             app.screen.show_mut().unwrap().show_selected = Some(selected);
@@ -1884,11 +1998,11 @@ mod tests {
             }),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.handle_key(Key::Enter, &mut history);
         assert!(app.status.contains("Patch location unavailable"));
         app.handle_key(Key::Escape, &mut history);
-        app.dispatch(Action::MoveDown, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         app.handle_key(Key::Enter, &mut history);
         assert_eq!(app.status, "");
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 0);
@@ -1902,7 +2016,7 @@ mod tests {
             result: Ok(show_data()),
         };
         app.initialize(&mut history).unwrap();
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         app.handle_key(Key::Enter, &mut history);
         app.handle_key(Key::Char('/'), &mut history);
         for key in "needle".chars().map(Key::Char).chain([Key::Enter]) {
@@ -1917,22 +2031,25 @@ mod tests {
             .show_diff_lines
             .push("x".repeat(200));
         app.set_horizontal_viewport_width(4);
-        app.dispatch(Action::ScrollRight, &mut history);
+        app.dispatch(
+            Action::Navigation(NavigationAction::ScrollRight),
+            &mut history,
+        );
         assert_eq!(app.screen.show().unwrap().show_diff_horizontal_offset, 2);
         assert_eq!(app.log.log_horizontal_offset, 0);
-        app.dispatch(Action::SearchNext, &mut history);
+        app.dispatch(Action::Search(SearchAction::Next), &mut history);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
-        app.dispatch(Action::SearchNext, &mut history);
+        app.dispatch(Action::Search(SearchAction::Next), &mut history);
         assert_eq!(app.status, "(END)");
-        app.dispatch(Action::SearchPrevious, &mut history);
+        app.dispatch(Action::Search(SearchAction::Previous), &mut history);
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
-        app.dispatch(Action::SearchPrevious, &mut history);
+        app.dispatch(Action::Search(SearchAction::Previous), &mut history);
         assert_eq!(app.status, "(TOP)");
         app.handle_key(Key::Escape, &mut history);
         app.handle_key(Key::Escape, &mut history);
-        app.dispatch(Action::MoveDown, &mut history);
-        app.dispatch(Action::ShowMode, &mut history);
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
         assert_eq!(app.log.selected, 1);
         assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
         assert_eq!(app.screen.show().unwrap().show_selected, Some(0));
@@ -1949,7 +2066,7 @@ mod tests {
             result: Err(GitError::Output("planned show failure".into())),
         };
         app.initialize(&mut failing).unwrap();
-        app.dispatch(Action::ShowMode, &mut failing);
+        app.dispatch(Action::Show(ShowAction::Open), &mut failing);
         assert_eq!(app.screen, Screen::Log);
         assert!(app.status.contains("planned show failure"));
         assert_eq!(app.log.selected, 0);
@@ -1963,7 +2080,7 @@ mod tests {
             }),
         };
         app.initialize(&mut empty).unwrap();
-        app.dispatch(Action::ShowMode, &mut empty);
+        app.dispatch(Action::Show(ShowAction::Open), &mut empty);
         app.handle_key(Key::Enter, &mut empty);
         assert!(matches!(app.screen, Screen::Show(_)));
         assert_eq!(app.screen.show().unwrap().show_selected, None);
@@ -1977,7 +2094,7 @@ mod tests {
             result: Ok(ShowData::default()),
         };
         app.initialize(&mut empty_log).unwrap();
-        app.dispatch(Action::ShowMode, &mut empty_log);
+        app.dispatch(Action::Show(ShowAction::Open), &mut empty_log);
         assert_eq!(app.screen, Screen::Log);
         assert_eq!(app.status, "Could not open show: No selected commit");
     }
