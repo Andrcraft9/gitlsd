@@ -28,9 +28,9 @@ Commands are `:help`/`:h` and `:quit`/`:q`. An empty or unknown command is repor
 
 ## Configuration
 
-By default, gitlsd reads `$HOME/.config/gitlsd/config`. A missing default file is fine; other filesystem errors are reported. Select another file with `--config PATH`; an explicitly selected file must exist and be valid.
+gitlsd reads `$HOME/.config/gitlsd/config` when it exists. Use `--config PATH` to select another file.
 
-Configuration is line-oriented. Whitespace separates arguments, single and double quotes preserve whitespace, backslash escapes a character, and `#` starts a comment outside quotes. `=` is optional:
+Configuration is line-oriented. Whitespace separates arguments, quotes preserve whitespace, backslash escapes a character, and `#` starts a comment. `=` is optional.
 
 ```text
 set log = git log --oneline --decorate --all --first-parent
@@ -44,35 +44,24 @@ bind x quit
 bind semicolon command
 ```
 
-`set log` supplies the full command and must begin with `git log`. The default is `git log --oneline --decorate`. Empty quoted arguments and literal `=` arguments are preserved. Git owns the displayed text: for example, `set log git log --format='%h %an: %s'` selects a custom one-line presentation. gitlsd adds pagination before any `-- <path>` arguments and disables external paging. Commands execute directly without a shell. Batch size must be greater than zero.
+- `log` defines the one-line commit listing. It must start with `git log`; multiline, graph, stat, patch, notes, and signature output are rejected.
+- `batch-size` sets pagination and must be greater than zero.
+- `preview`, `show-commit`, and `show` customize commit views.
+- `status-diff` customizes status diff presentation. Status discovery and staging commands remain fixed.
+- `bind` maps a character or named key to an action. Enter and Backspace are reserved for text input.
 
-Each row must represent one commit. Multiline formats and graph, stat, patch, notes, and signature output are rejected with a configuration error; use `--oneline` or a one-line `--format`. A companion query retrieves stable commit IDs using the same history selection and pagination. Search matches displayed text. Git ANSI SGR colors are rendered interactively and stripped from deterministic debug output; other terminal controls are neutralized.
-
-Keys are a single character or one of `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, `tab`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `scroll-start`, `scroll-end`, `scroll-right`, `scroll-left`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, `toggle-preview`, `show-mode`, `status-mode`, `status-switch-group`, and `status-toggle-stage`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every configured argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
-
-The interactive frontend leaves mouse input to the terminal. Drag-select any currently rendered log, preview, show, help, status, or input text and use the terminal's ordinary copy operation. Mouse-wheel and touchpad scrolling are likewise terminal-owned; because gitlsd uses the alternate screen, that may not provide normal scrollback. Use the configured keyboard controls to scroll gitlsd panes.
-
-The selected commit preview is visible by default. It runs `git show --stat --patch` with the selected full commit ID appended; `set preview git show ...` customizes that command. Enter focuses the preview, where navigation and search act only on preview text.
-The preview is placed beside the log only when the terminal is sufficiently wide; otherwise it is stacked below the log. The automatic choice accounts for the rectangular shape of terminal cells.
-
-Press `d` to open full-screen show mode for the selected commit. Show mode places configurable commit metadata and a fixed Git name-status file list (`M path`, `R100 old-path new-path`, and so on) beside the complete configured diff, using the same automatic split rule as the preview. The file list is focused first; Enter focuses the diff at the selected file's patch header, and scrolling the diff keeps the explorer selection on the current file. Escape returns from the diff to the file list and then to the log. `set show-commit git show ...` and `set show git show ...` customize the metadata and diff commands independently; both receive the selected full commit ID.
-
-Press `s` to open full-screen status mode. It shows staged and unstaged file lists stacked evenly in the explorer pane beside the complete diff for the active group, using the same automatic split rule as the preview and show modes. Status discovery always uses Git porcelain v1 NUL output, so untracked files are listed, included as new-file patches in the unstaged diff, and kept as raw paths for mutations. Enter focuses the active group's diff; scrolling and searching it keep the matching file selected. `u` performs a whole-file stage or unstage operation and refreshes both groups and diffs. Status mode works before the first commit, and it preserves the log selection when it closes. Only the diff presentation is configurable with `set status-diff git diff ...`; discovery and mutations use fixed Git commands.
-
-Invalid configuration reports its file, line, and reason.
+Git commands run directly without a shell or external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
 
 ## Deterministic debug interface
 
-Debug builds expose `--debug KEYS` for integration testing without a TTY. `KEYS` is a semicolon-separated sequence of the same key names used by the interactive frontend; literal characters are individual keys. Use the named key `semicolon` to represent the separator character itself. For example:
+Debug builds provide `--debug KEYS` for integration tests without a TTY. Separate keys with semicolons; literal characters and the same named keys used by the interactive frontend are accepted.
 
 ```console
 cargo run -- --debug 'down;down;up'
 cargo run -- --debug '/;r;e;l;e;a;s;e;enter;n'
-cargo run -- --debug ':;h;e;l;p;enter'
-cargo run -- --debug 'd;down;enter;esc;esc'
 ```
 
-The command prints a stable plain-text snapshot including screen, selection, loaded rows, selected commit, status, and either log rows, effective help, or show metadata, file rows, and diff. Invalid scripted keys return a nonzero exit status. This option is compiled out of release builds and is not shown by `target/release/gitlsd --help`.
+The command prints a stable plain-text state snapshot. Use `semicolon` for the separator key itself. Invalid keys fail with a nonzero exit status. Release builds omit this option.
 
 ## Development
 
