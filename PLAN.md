@@ -22,3 +22,4 @@
 - [ ] (S) Adjust automatic vertical/horizontal tab split (used for preview).
 - [ ] (S) "q" key should work as "ESC" - the same. Pressing "ESC/q" when in log mode and if log is in focus should exit app.
 - [ ] (S) Preview/show: add new keys to adjust context size, e.g. `[` and `]` defaults like in `tig`.
+- [ ] (S) Don't print "Loaded commits N".
