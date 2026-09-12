@@ -260,7 +260,7 @@ impl Default for Config {
             (Key::Char(':'), Action::Global(GlobalAction::Command)),
             (Key::Char('?'), Action::Global(GlobalAction::Help)),
             (Key::Escape, Action::Global(GlobalAction::Back)),
-            (Key::Char('q'), Action::Global(GlobalAction::Quit)),
+            (Key::Char('q'), Action::Global(GlobalAction::Back)),
             (Key::Ctrl('c'), Action::Global(GlobalAction::Quit)),
             (Key::Char('p'), Action::Preview(PreviewAction::Toggle)),
             (Key::Char('d'), Action::Show(ShowAction::Open)),

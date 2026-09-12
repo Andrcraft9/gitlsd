@@ -189,9 +189,29 @@ fn help_reflects_effective_configuration_and_quit_is_clean() {
     assert!(help.contains("binding.d=show-mode\n"));
     assert!(help.contains("binding.x=move-down\n"));
 
-    let quit = stdout(run(":;q;enter", ""));
+    let quit = stdout(run("q", ""));
     assert!(quit.contains("running=false\n"));
     assert!(quit.contains("status=Quit requested\n"));
+}
+
+#[test]
+fn q_backs_out_through_focus_levels_before_quitting() {
+    let preview = stdout(run_preview("enter;q", ""));
+    assert!(preview.contains("screen=log\n"));
+    assert!(preview.contains("preview.focused=false\n"));
+    assert!(preview.contains("running=true\n"));
+
+    let show = stdout(run("d;enter;q;q", ""));
+    assert!(show.contains("screen=log\n"));
+    assert!(show.contains("running=true\n"));
+
+    let help = stdout(run("?;q", ""));
+    assert!(help.contains("screen=log\n"));
+    assert!(help.contains("running=true\n"));
+
+    let quit = stdout(run("d;enter;q;q;q", ""));
+    assert!(quit.contains("screen=log\n"));
+    assert!(quit.contains("running=false\n"));
 }
 
 #[test]

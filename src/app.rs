@@ -258,9 +258,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: Key, source: &mut impl HistorySource) {
-        if matches!(key, Key::Ctrl(_))
-            && self.config.action_for(&key) == Some(Action::Global(GlobalAction::Quit))
-        {
+        if self.config.action_for(&key) == Some(Action::Global(GlobalAction::Quit)) {
             self.dispatch(Action::Global(GlobalAction::Quit), source);
             return;
         }
@@ -546,9 +544,13 @@ impl App {
                     self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
                     self.input = InputMode::Normal;
                 }
-                ActivePane::Help | ActivePane::Log => {
+                ActivePane::Help => {
                     self.screen = Screen::Log;
                     self.input = InputMode::Normal;
+                }
+                ActivePane::Log => {
+                    self.running = false;
+                    self.status = "Quit requested".into();
                 }
             },
             GlobalAction::Quit => {
@@ -1277,21 +1279,36 @@ mod tests {
     }
 
     #[test]
-    fn control_quit_binding_wins_during_text_entry() {
+    fn configured_quit_bindings_win_during_text_entry() {
         let mut app = App::new(Config::default());
         let mut history = FakeHistory {
             records: records(1),
             fail_at: None,
         };
-        app.initialize(&mut history).unwrap();
         app.input = InputMode::Search("query".into());
-        app.handle_key(Key::Ctrl('c'), &mut history);
-        assert!(!app.running);
+        app.handle_key(Key::Char('q'), &mut history);
+        assert_eq!(app.input, InputMode::Search("queryq".into()));
 
-        let mut app = App::new(Config::default());
-        app.input = InputMode::Command("help".into());
-        app.handle_key(Key::Ctrl('c'), &mut history);
-        assert!(!app.running);
+        let mut config = Config::default();
+        config
+            .bindings
+            .insert(Key::Char('x'), Action::Global(GlobalAction::Quit));
+        for key in [Key::Char('x'), Key::Ctrl('c')] {
+            let mut app = App::new(config.clone());
+            let mut history = FakeHistory {
+                records: records(1),
+                fail_at: None,
+            };
+            app.initialize(&mut history).unwrap();
+            app.input = InputMode::Search("query".into());
+            app.handle_key(key.clone(), &mut history);
+            assert!(!app.running);
+
+            let mut app = App::new(config.clone());
+            app.input = InputMode::Command("help".into());
+            app.handle_key(key, &mut history);
+            assert!(!app.running);
+        }
     }
 
     #[test]
@@ -1848,6 +1865,37 @@ mod tests {
         assert_eq!(app.screen, Screen::Log);
         assert_eq!(app.log, log_before);
         assert_eq!(app.status, "");
+    }
+
+    #[test]
+    fn q_and_escape_back_out_or_quit_from_the_same_focused_pane() {
+        for key in [Key::Char('q'), Key::Escape] {
+            let mut app = App::new(Config::default());
+            let mut history = ShowHistory {
+                records: records(1),
+                result: Ok(show_data()),
+            };
+            app.initialize(&mut history).unwrap();
+
+            app.handle_key(Key::Enter, &mut history);
+            app.handle_key(key.clone(), &mut history);
+            assert!(!app.log.preview_focused);
+            assert!(app.running);
+
+            app.dispatch(Action::Show(ShowAction::Open), &mut history);
+            app.handle_key(Key::Enter, &mut history);
+            app.handle_key(key.clone(), &mut history);
+            assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
+            assert!(app.running);
+
+            app.handle_key(key.clone(), &mut history);
+            assert_eq!(app.screen, Screen::Log);
+            assert!(app.running);
+
+            app.handle_key(key, &mut history);
+            assert!(!app.running);
+            assert_eq!(app.status, "Quit requested");
+        }
     }
 
     #[test]
