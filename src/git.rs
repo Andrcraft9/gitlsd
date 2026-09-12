@@ -55,6 +55,10 @@ impl StatusFile {
             .chain(self.new_path.iter())
             .map(Vec::as_slice)
     }
+
+    fn is_untracked(&self) -> bool {
+        self.display.starts_with("?? ")
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -96,23 +100,6 @@ pub struct GitHistory {
 
 impl GitHistory {
     pub fn new(
-        directory: impl Into<PathBuf>,
-        command: Vec<String>,
-        preview_command: Vec<String>,
-        show_commit_command: Vec<String>,
-        show_command: Vec<String>,
-    ) -> Self {
-        Self::with_status_diff(
-            directory,
-            command,
-            preview_command,
-            show_commit_command,
-            show_command,
-            vec!["git".into(), "diff".into()],
-        )
-    }
-
-    pub fn with_status_diff(
         directory: impl Into<PathBuf>,
         command: Vec<String>,
         preview_command: Vec<String>,
@@ -222,6 +209,7 @@ impl GitHistory {
         directory: &Path,
         arguments: &[OsString],
         stage: &str,
+        accept_differences: bool,
     ) -> Result<Vec<u8>, GitError> {
         let output = Command::new("git")
             .arg("--no-pager")
@@ -235,7 +223,7 @@ impl GitHistory {
                 stage: stage.into(),
                 reason: format!("could not run Git: {error}"),
             })?;
-        if !output.status.success() {
+        if !(output.status.success() || accept_differences && output.status.code() == Some(1)) {
             return Err(GitError::Status {
                 stage: stage.into(),
                 reason: format!(
@@ -266,6 +254,42 @@ impl GitHistory {
             arguments.insert(1.min(arguments.len()), OsString::from("--staged"));
         }
         arguments
+    }
+
+    fn untracked_diff_arguments(&self, path: &[u8]) -> Vec<OsString> {
+        let mut arguments = self.status_diff_command[1..]
+            .iter()
+            .take_while(|argument| argument.as_str() != "--")
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        arguments.extend([
+            OsString::from("--no-index"),
+            OsString::from("--"),
+            OsString::from(null_device()),
+            os_string_from_bytes(path),
+        ]);
+        arguments
+    }
+
+    fn load_untracked_diffs(
+        &self,
+        root: &Path,
+        files: &[StatusFile],
+    ) -> Result<Vec<String>, GitError> {
+        let mut lines = Vec::new();
+        for file in files.iter().filter(|file| file.is_untracked()) {
+            let Some(path) = file.new_path.as_deref() else {
+                continue;
+            };
+            let arguments = self.untracked_diff_arguments(path);
+            let output = self.run_status_command(root, &arguments, "untracked diff", true)?;
+            lines.extend(
+                String::from_utf8_lossy(&output)
+                    .lines()
+                    .map(|line| safe_text(line, true)),
+            );
+        }
+        Ok(lines)
     }
 
     fn has_head(&self, root: &Path) -> Result<bool, GitError> {
@@ -383,24 +407,28 @@ impl HistorySource for GitHistory {
                 "--untracked-files=all".into(),
             ],
             "discovery",
+            false,
         )?;
         let (staged, unstaged) = parse_status(&output)?;
         let staged_diff = String::from_utf8_lossy(&self.run_status_command(
             &root,
             &self.status_diff_arguments(true),
             "staged diff",
+            false,
         )?)
         .lines()
         .map(|line| safe_text(line, true))
         .collect();
-        let unstaged_diff = String::from_utf8_lossy(&self.run_status_command(
+        let mut unstaged_diff = String::from_utf8_lossy(&self.run_status_command(
             &root,
             &self.status_diff_arguments(false),
             "unstaged diff",
+            false,
         )?)
         .lines()
         .map(|line| safe_text(line, true))
-        .collect();
+        .collect::<Vec<_>>();
+        unstaged_diff.extend(self.load_untracked_diffs(&root, &unstaged)?);
         Ok(StatusData {
             staged,
             unstaged,
@@ -426,7 +454,7 @@ impl HistorySource for GitHistory {
             vec!["add".into(), "--all".into(), "--".into()]
         };
         arguments.extend(file.mutation_paths().map(literal_path));
-        self.run_status_command(&root, &arguments, "mutation")?;
+        self.run_status_command(&root, &arguments, "mutation", false)?;
         Ok(())
     }
 }
@@ -526,6 +554,16 @@ fn is_unborn_error(stderr: &str) -> bool {
 #[cfg(unix)]
 fn os_string_from_bytes(bytes: &[u8]) -> OsString {
     OsString::from_vec(bytes.to_vec())
+}
+
+#[cfg(unix)]
+fn null_device() -> &'static str {
+    "/dev/null"
+}
+
+#[cfg(not(unix))]
+fn null_device() -> &'static str {
+    "NUL"
 }
 
 #[cfg(not(unix))]
@@ -766,7 +804,7 @@ fn parse_quoted_git_path(input: &str) -> Option<(String, usize)> {
                 position += escaped.len_utf8();
                 match escaped {
                     '0'..='7' => {
-                        let mut value = escaped as u8 - b'0';
+                        let mut value = u16::from(escaped as u8 - b'0');
                         for _ in 0..2 {
                             let Some(digit) = input[position..].chars().next() else {
                                 break;
@@ -775,9 +813,9 @@ fn parse_quoted_git_path(input: &str) -> Option<(String, usize)> {
                                 break;
                             }
                             position += digit.len_utf8();
-                            value = value * 8 + digit as u8 - b'0';
+                            value = value * 8 + u16::from(digit as u8 - b'0');
                         }
-                        bytes.push(value);
+                        bytes.push(u8::try_from(value).ok()?);
                     }
                     'a' => bytes.push(b'\x07'),
                     'b' => bytes.push(b'\x08'),
@@ -1076,7 +1114,7 @@ mod tests {
 
     #[test]
     fn staged_status_diff_flag_precedes_configured_path_arguments() {
-        let history = GitHistory::with_status_diff(
+        let history = GitHistory::new(
             ".",
             vec!["git".into(), "log".into()],
             vec!["git".into(), "show".into()],
@@ -1097,6 +1135,35 @@ mod tests {
         assert_eq!(
             history.status_diff_arguments(false),
             ["diff", "--word-diff", "--", "*.rs"]
+        );
+    }
+
+    #[test]
+    fn untracked_diff_uses_configured_presentation_options_and_exact_path() {
+        let history = GitHistory::new(
+            ".",
+            vec!["git".into(), "log".into()],
+            vec!["git".into(), "show".into()],
+            vec!["git".into(), "show".into()],
+            vec!["git".into(), "show".into()],
+            vec![
+                "git".into(),
+                "diff".into(),
+                "--word-diff".into(),
+                "--".into(),
+                "*.rs".into(),
+            ],
+        );
+        assert_eq!(
+            history.untracked_diff_arguments(b"literal[*].txt"),
+            [
+                OsString::from("diff"),
+                OsString::from("--word-diff"),
+                OsString::from("--no-index"),
+                OsString::from("--"),
+                OsString::from(null_device()),
+                OsString::from("literal[*].txt"),
+            ]
         );
     }
 }

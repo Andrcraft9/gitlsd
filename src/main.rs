@@ -26,7 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
     let directory = current_directory()?;
-    let mut source = GitHistory::with_status_diff(
+    let mut source = GitHistory::new(
         directory,
         config.log_command.clone(),
         config.preview_command.clone(),

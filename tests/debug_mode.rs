@@ -652,7 +652,9 @@ fn status_lists_both_groups_and_keeps_the_complete_active_diff() {
 
     let untracked = stdout(run_in(&directory, "s;down;enter", ""));
     assert!(untracked.contains("status.focus=diff\n"));
-    assert!(untracked.contains("status=Patch location unavailable for"));
+    assert!(untracked.contains("status=\n"));
+    assert!(untracked.contains("diff --git a/untracked file.txt b/untracked file.txt"));
+    assert!(untracked.contains("+untracked"));
 }
 
 #[test]
@@ -858,6 +860,11 @@ fn status_handles_unborn_repositories_and_preserves_untracked_contents() {
     assert!(output.contains("loaded=0\n"));
     assert!(output.contains("?? worktree.txt\n"));
 
+    let focused = stdout(run_in(&directory, "s;enter", ""));
+    assert!(focused.contains("status.focus=diff\n"));
+    assert!(focused.contains("diff --git a/worktree.txt b/worktree.txt"));
+    assert!(focused.contains("+worktree"));
+
     let staged = stdout(run_in(&directory, "s;u", ""));
     assert!(staged.contains("A  worktree.txt\n"));
     assert_eq!(fs::read(&path).unwrap(), before);
@@ -874,6 +881,12 @@ fn status_handles_unborn_repositories_and_preserves_untracked_contents() {
 fn status_mutations_use_exact_special_paths() {
     let (directory, name) = special_status_fixture();
     let before = fs::read(directory.join(&name)).unwrap();
+
+    let focused = stdout(run_in(&directory, "s;enter", ""));
+    assert!(focused.contains("status.focus=diff\n"));
+    assert!(focused.contains("status=\n"));
+    assert!(focused.contains("+special"));
+
     let output = stdout(run_in(&directory, "s;u", ""));
     assert!(output.contains("status.staged:\n"));
     assert_eq!(fs::read(directory.join(&name)).unwrap(), before);
