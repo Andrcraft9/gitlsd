@@ -1,11 +1,12 @@
 //! Application state machine and behavior.
 //!
-//! [`App`] owns screens, input modes, selection, pagination, search, commands,
-//! preview and show state, and shutdown intent. It works through
+//! [`App`] owns persistent log state plus enum-scoped help and show state,
+//! input modes, commands, and shutdown intent. It works through
 //! [`HistorySource`] and has no dependency on terminal libraries or concrete
 //! process execution.
 
 use std::collections::HashSet;
+use std::ops::{Deref, DerefMut};
 
 use crate::config::{Action, Config, Key};
 use crate::git::{
@@ -13,11 +14,42 @@ use crate::git::{
 };
 use unicode_width::UnicodeWidthStr;
 
+/// The active screen and the state that exists only while that screen is open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
     Log,
-    Help,
-    Show,
+    Help(HelpState),
+    Show(ShowState),
+}
+
+impl Screen {
+    pub fn help(&self) -> Option<&HelpState> {
+        match self {
+            Self::Help(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn help_mut(&mut self) -> Option<&mut HelpState> {
+        match self {
+            Self::Help(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn show(&self) -> Option<&ShowState> {
+        match self {
+            Self::Show(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn show_mut(&mut self) -> Option<&mut ShowState> {
+        match self {
+            Self::Show(state) => Some(state),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,22 +65,33 @@ pub enum InputMode {
     Command(String),
 }
 
-pub struct App {
-    pub config: Config,
+/// Persistent log and preview state retained across screen transitions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogState {
     pub records: Vec<CommitRecord>,
     pub selected: usize,
-    pub screen: Screen,
-    pub input: InputMode,
-    pub status: String,
-    pub running: bool,
-    pub help_offset: usize,
-    pub help_horizontal_offset: usize,
     pub log_horizontal_offset: usize,
     pub preview_visible: bool,
     pub preview_focused: bool,
     pub preview_lines: Vec<String>,
     pub preview_offset: usize,
     pub preview_horizontal_offset: usize,
+    has_more: bool,
+    next_offset: usize,
+    last_search: Option<String>,
+    last_preview_search: Option<String>,
+}
+
+/// Scroll state that exists only while help is active.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HelpState {
+    pub offset: usize,
+    pub horizontal_offset: usize,
+}
+
+/// Explorer, diff, and search state that exists only while show is active.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShowState {
     pub show_focus: ShowFocus,
     pub show_metadata: Vec<String>,
     pub show_files: Vec<ChangedFile>,
@@ -58,32 +101,12 @@ pub struct App {
     pub show_explorer_horizontal_offset: usize,
     pub show_diff_offset: usize,
     pub show_diff_horizontal_offset: usize,
-    horizontal_viewport_width: usize,
-    has_more: bool,
-    next_offset: usize,
-    last_search: Option<String>,
-    last_preview_search: Option<String>,
     last_show_search: Option<String>,
 }
 
-impl App {
-    pub fn new(config: Config) -> Self {
+impl Default for ShowState {
+    fn default() -> Self {
         Self {
-            config,
-            records: Vec::new(),
-            selected: 0,
-            screen: Screen::Log,
-            input: InputMode::Normal,
-            status: String::new(),
-            running: true,
-            help_offset: 0,
-            help_horizontal_offset: 0,
-            log_horizontal_offset: 0,
-            preview_visible: true,
-            preview_focused: false,
-            preview_lines: Vec::new(),
-            preview_offset: 0,
-            preview_horizontal_offset: 0,
             show_focus: ShowFocus::Explorer,
             show_metadata: Vec::new(),
             show_files: Vec::new(),
@@ -93,12 +116,58 @@ impl App {
             show_explorer_horizontal_offset: 0,
             show_diff_offset: 0,
             show_diff_horizontal_offset: 0,
-            horizontal_viewport_width: 1,
-            has_more: true,
-            next_offset: 0,
-            last_search: None,
-            last_preview_search: None,
             last_show_search: None,
+        }
+    }
+}
+
+pub struct App {
+    pub config: Config,
+    pub log: LogState,
+    pub screen: Screen,
+    pub input: InputMode,
+    pub status: String,
+    pub running: bool,
+    horizontal_viewport_width: usize,
+}
+
+impl Deref for App {
+    type Target = LogState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.log
+    }
+}
+
+impl DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.log
+    }
+}
+
+impl App {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            log: LogState {
+                records: Vec::new(),
+                selected: 0,
+                log_horizontal_offset: 0,
+                preview_visible: true,
+                preview_focused: false,
+                preview_lines: Vec::new(),
+                preview_offset: 0,
+                preview_horizontal_offset: 0,
+                has_more: true,
+                next_offset: 0,
+                last_search: None,
+                last_preview_search: None,
+            },
+            screen: Screen::Log,
+            input: InputMode::Normal,
+            status: String::new(),
+            running: true,
+            horizontal_viewport_width: 1,
         }
     }
 
@@ -147,14 +216,19 @@ impl App {
             },
             InputMode::Normal => {
                 if key == Key::Enter {
-                    match self.screen {
-                        Screen::Log if self.preview_visible && self.selected_record().is_some() => {
-                            self.preview_focused = true;
-                        }
-                        Screen::Show if self.show_focus == ShowFocus::Explorer => {
-                            self.focus_show_diff();
-                        }
-                        _ => {}
+                    if matches!(self.screen, Screen::Log)
+                        && self.preview_visible
+                        && self.selected_record().is_some()
+                    {
+                        self.preview_focused = true;
+                    } else if matches!(
+                        self.screen,
+                        Screen::Show(ShowState {
+                            show_focus: ShowFocus::Explorer,
+                            ..
+                        })
+                    ) {
+                        self.focus_show_diff();
                     }
                     return;
                 }
@@ -170,7 +244,7 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
-        if self.preview_focused && self.screen == Screen::Log {
+        if self.preview_focused && matches!(self.screen, Screen::Log) {
             match action {
                 Action::MoveDown => {
                     self.preview_offset =
@@ -206,8 +280,8 @@ impl App {
                 return;
             }
         }
-        if self.screen == Screen::Show {
-            match self.show_focus {
+        if let Some(focus) = self.screen.show().map(|state| state.show_focus) {
+            match focus {
                 ShowFocus::Explorer => match action {
                     Action::MoveDown => self.move_show_down(),
                     Action::MoveUp => self.move_show_up(),
@@ -230,21 +304,25 @@ impl App {
                 },
                 ShowFocus::Diff => match action {
                     Action::MoveDown => {
-                        self.show_diff_offset = (self.show_diff_offset + 1)
-                            .min(self.show_diff_lines.len().saturating_sub(1));
+                        let show = self.screen.show_mut().unwrap();
+                        show.show_diff_offset = (show.show_diff_offset + 1)
+                            .min(show.show_diff_lines.len().saturating_sub(1));
                         self.sync_show_selection_to_diff();
                     }
                     Action::MoveUp => {
-                        self.show_diff_offset = self.show_diff_offset.saturating_sub(1);
+                        let show = self.screen.show_mut().unwrap();
+                        show.show_diff_offset = show.show_diff_offset.saturating_sub(1);
                         self.sync_show_selection_to_diff();
                     }
                     Action::PageDown => {
-                        self.show_diff_offset = (self.show_diff_offset + 10)
-                            .min(self.show_diff_lines.len().saturating_sub(1));
+                        let show = self.screen.show_mut().unwrap();
+                        show.show_diff_offset = (show.show_diff_offset + 10)
+                            .min(show.show_diff_lines.len().saturating_sub(1));
                         self.sync_show_selection_to_diff();
                     }
                     Action::PageUp => {
-                        self.show_diff_offset = self.show_diff_offset.saturating_sub(10);
+                        let show = self.screen.show_mut().unwrap();
+                        show.show_diff_offset = show.show_diff_offset.saturating_sub(10);
                         self.sync_show_selection_to_diff();
                     }
                     Action::ScrollRight
@@ -255,7 +333,7 @@ impl App {
                     Action::SearchNext => self.repeat_show_search(true),
                     Action::SearchPrevious => self.repeat_show_search(false),
                     Action::Back => {
-                        self.show_focus = ShowFocus::Explorer;
+                        self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
                         self.input = InputMode::Normal;
                     }
                     Action::Quit | Action::TogglePreview | Action::ShowMode => {}
@@ -271,13 +349,25 @@ impl App {
                 return;
             }
         }
-        if self.screen == Screen::Help {
+        if matches!(self.screen, Screen::Help(_)) {
             let last_line = self.config.help_lines().len().saturating_sub(1);
             match action {
-                Action::MoveDown => self.help_offset = (self.help_offset + 1).min(last_line),
-                Action::MoveUp => self.help_offset = self.help_offset.saturating_sub(1),
-                Action::PageDown => self.help_offset = (self.help_offset + 10).min(last_line),
-                Action::PageUp => self.help_offset = self.help_offset.saturating_sub(10),
+                Action::MoveDown => {
+                    let help = self.screen.help_mut().unwrap();
+                    help.offset = (help.offset + 1).min(last_line);
+                }
+                Action::MoveUp => {
+                    let help = self.screen.help_mut().unwrap();
+                    help.offset = help.offset.saturating_sub(1);
+                }
+                Action::PageDown => {
+                    let help = self.screen.help_mut().unwrap();
+                    help.offset = (help.offset + 10).min(last_line);
+                }
+                Action::PageUp => {
+                    let help = self.screen.help_mut().unwrap();
+                    help.offset = help.offset.saturating_sub(10);
+                }
                 Action::ScrollRight => self.scroll_horizontal(action),
                 Action::ScrollLeft => self.scroll_horizontal(action),
                 Action::ScrollStart | Action::ScrollEnd => self.scroll_horizontal(action),
@@ -333,9 +423,7 @@ impl App {
             Action::SearchPrevious => self.repeat_search(false, source),
             Action::Command => self.input = InputMode::Command(String::new()),
             Action::Help => {
-                self.screen = Screen::Help;
-                self.help_offset = 0;
-                self.help_horizontal_offset = 0;
+                self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
             Action::Back => {
@@ -360,17 +448,17 @@ impl App {
     fn scroll_horizontal(&mut self, action: Action) {
         let maximum = self.max_horizontal_offset();
         let step = (self.horizontal_viewport_width / 2).max(1);
-        let offset = if self.preview_focused && self.screen == Screen::Log {
+        let offset = if self.preview_focused && matches!(self.screen, Screen::Log) {
             &mut self.preview_horizontal_offset
-        } else if self.screen == Screen::Help {
-            &mut self.help_horizontal_offset
-        } else if self.screen == Screen::Show {
-            match self.show_focus {
-                ShowFocus::Explorer => &mut self.show_explorer_horizontal_offset,
-                ShowFocus::Diff => &mut self.show_diff_horizontal_offset,
-            }
         } else {
-            &mut self.log_horizontal_offset
+            match &mut self.screen {
+                Screen::Help(help) => &mut help.horizontal_offset,
+                Screen::Show(show) => match show.show_focus {
+                    ShowFocus::Explorer => &mut show.show_explorer_horizontal_offset,
+                    ShowFocus::Diff => &mut show.show_diff_horizontal_offset,
+                },
+                Screen::Log => &mut self.log.log_horizontal_offset,
+            }
         };
         *offset = match action {
             Action::ScrollStart => 0,
@@ -382,30 +470,30 @@ impl App {
     }
 
     fn max_horizontal_offset(&self) -> usize {
-        let content_width = match self.screen {
+        let content_width = match &self.screen {
             Screen::Log if self.preview_focused => self
                 .preview_lines
                 .iter()
                 .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
                 .max()
                 .unwrap_or(0),
-            Screen::Help => self
+            Screen::Help(_) => self
                 .config
                 .help_lines()
                 .iter()
                 .map(|line| UnicodeWidthStr::width(line.as_str()))
                 .max()
                 .unwrap_or(0),
-            Screen::Show if self.show_focus == ShowFocus::Diff => self
+            Screen::Show(show) if show.show_focus == ShowFocus::Diff => show
                 .show_diff_lines
                 .iter()
                 .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
                 .max()
                 .unwrap_or(0),
-            Screen::Show => self
+            Screen::Show(show) => show
                 .show_metadata
                 .iter()
-                .chain(self.show_files.iter().map(|file| &file.display))
+                .chain(show.show_files.iter().map(|file| &file.display))
                 .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
                 .max()
                 .unwrap_or(0),
@@ -442,38 +530,42 @@ impl App {
     }
 
     fn move_show_down(&mut self) {
-        let Some(selected) = self.show_selected else {
+        let show = self.screen.show_mut().unwrap();
+        let Some(selected) = show.show_selected else {
             return;
         };
-        if selected + 1 < self.show_files.len() {
-            self.show_selected = Some(selected + 1);
-            self.show_explorer_offset = selected + 1;
+        if selected + 1 < show.show_files.len() {
+            show.show_selected = Some(selected + 1);
+            show.show_explorer_offset = selected + 1;
         }
     }
 
     fn move_show_up(&mut self) {
-        if let Some(selected) = self.show_selected {
-            self.show_selected = Some(selected.saturating_sub(1));
-            self.show_explorer_offset = selected.saturating_sub(1);
+        let show = self.screen.show_mut().unwrap();
+        if let Some(selected) = show.show_selected {
+            show.show_selected = Some(selected.saturating_sub(1));
+            show.show_explorer_offset = selected.saturating_sub(1);
         }
     }
 
     fn page_show_down(&mut self) {
-        let Some(selected) = self.show_selected else {
+        let show = self.screen.show_mut().unwrap();
+        let Some(selected) = show.show_selected else {
             return;
         };
-        if !self.show_files.is_empty() {
-            let next = (selected + 10).min(self.show_files.len() - 1);
-            self.show_selected = Some(next);
-            self.show_explorer_offset = next;
+        if !show.show_files.is_empty() {
+            let next = (selected + 10).min(show.show_files.len() - 1);
+            show.show_selected = Some(next);
+            show.show_explorer_offset = next;
         }
     }
 
     fn page_show_up(&mut self) {
-        if let Some(selected) = self.show_selected {
+        let show = self.screen.show_mut().unwrap();
+        if let Some(selected) = show.show_selected {
             let next = selected.saturating_sub(10);
-            self.show_selected = Some(next);
-            self.show_explorer_offset = next;
+            show.show_selected = Some(next);
+            show.show_explorer_offset = next;
         }
     }
 
@@ -511,10 +603,12 @@ impl App {
             self.status = "Search query is empty".into();
             return;
         }
-        if self.screen == Screen::Show && self.show_focus == ShowFocus::Diff {
-            self.last_show_search = Some(query);
-            self.search_show_diff(forward, true);
-            return;
+        if let Screen::Show(show) = &mut self.screen {
+            if show.show_focus == ShowFocus::Diff {
+                show.last_show_search = Some(query);
+                self.search_show_diff(forward, true);
+                return;
+            }
         }
         if self.preview_focused {
             self.last_preview_search = Some(query);
@@ -659,15 +753,15 @@ impl App {
             return;
         };
 
-        self.reset_show_state();
         match source.load_show(&id) {
             Ok(data) => {
-                self.show_metadata = data.metadata;
-                self.show_files = data.files;
-                self.show_diff_lines = data.diff;
-                self.show_selected = (!self.show_files.is_empty()).then_some(0);
-                self.screen = Screen::Show;
-                self.show_focus = ShowFocus::Explorer;
+                self.screen = Screen::Show(ShowState {
+                    show_metadata: data.metadata,
+                    show_selected: (!data.files.is_empty()).then_some(0),
+                    show_files: data.files,
+                    show_diff_lines: data.diff,
+                    ..ShowState::default()
+                });
                 self.input = InputMode::Normal;
                 self.status.clear();
             }
@@ -678,49 +772,43 @@ impl App {
         }
     }
 
-    fn reset_show_state(&mut self) {
-        self.show_focus = ShowFocus::Explorer;
-        self.show_metadata.clear();
-        self.show_files.clear();
-        self.show_diff_lines.clear();
-        self.show_selected = None;
-        self.show_explorer_offset = 0;
-        self.show_explorer_horizontal_offset = 0;
-        self.show_diff_offset = 0;
-        self.show_diff_horizontal_offset = 0;
-        self.last_show_search = None;
-    }
-
     fn focus_show_diff(&mut self) {
-        let Some(selected) = self.show_selected else {
+        let show = self.screen.show_mut().unwrap();
+        let Some(selected) = show.show_selected else {
             return;
         };
-        let Some(file) = self.show_files.get(selected) else {
-            self.show_selected = None;
+        let Some(file) = show.show_files.get(selected) else {
+            show.show_selected = None;
             return;
         };
-        self.show_focus = ShowFocus::Diff;
-        self.show_diff_horizontal_offset = 0;
-        if let Some(offset) = patch_offset(&self.show_diff_lines, file) {
-            self.show_diff_offset = offset;
-            self.status.clear();
+        show.show_focus = ShowFocus::Diff;
+        show.show_diff_horizontal_offset = 0;
+        let status = if let Some(offset) = patch_offset(&show.show_diff_lines, file) {
+            show.show_diff_offset = offset;
+            None
         } else {
-            self.show_diff_offset = 0;
-            self.status = format!(
+            show.show_diff_offset = 0;
+            Some(format!(
                 "Patch location unavailable for {}",
                 crate::git::safe_text(&file.display, false)
-            );
+            ))
+        };
+        if let Some(status) = status {
+            self.status = status;
+        } else {
+            self.status.clear();
         }
     }
 
     fn sync_show_selection_to_diff(&mut self) {
+        let show = self.screen.show_mut().unwrap();
         if let Some(selected) = file_at_patch_offset(
-            &self.show_diff_lines,
-            &self.show_files,
-            self.show_diff_offset,
+            &show.show_diff_lines,
+            &show.show_files,
+            show.show_diff_offset,
         ) {
-            self.show_selected = Some(selected);
-            self.show_explorer_offset = selected;
+            show.show_selected = Some(selected);
+            show.show_explorer_offset = selected;
         }
     }
 
@@ -729,57 +817,58 @@ impl App {
     }
 
     fn search_show_diff(&mut self, forward: bool, wrap: bool) {
-        let Some(query) = self.last_show_search.clone() else {
+        let show = self.screen.show_mut().unwrap();
+        let Some(query) = show.last_show_search.clone() else {
             self.status = "No previous search".into();
             return;
         };
         let query_lower = query.to_lowercase();
-        let length = self.show_diff_lines.len();
+        let length = show.show_diff_lines.len();
         if length == 0 {
             self.status = format!("No match for `{query}`");
             return;
         }
         let matches = |index: &usize| {
-            crate::git::safe_text(&self.show_diff_lines[*index], false)
+            crate::git::safe_text(&show.show_diff_lines[*index], false)
                 .to_lowercase()
                 .contains(&query_lower)
         };
         let index = if forward {
-            let later = (self.show_diff_offset + 1..length).find(&matches);
+            let later = (show.show_diff_offset + 1..length).find(&matches);
             later.or_else(|| {
-                wrap.then(|| (0..=self.show_diff_offset.min(length - 1)).find(&matches))
+                wrap.then(|| (0..=show.show_diff_offset.min(length - 1)).find(&matches))
                     .flatten()
             })
         } else {
-            let earlier = (0..self.show_diff_offset).rev().find(&matches);
+            let earlier = (0..show.show_diff_offset).rev().find(&matches);
             earlier.or_else(|| {
-                wrap.then(|| (self.show_diff_offset..length).rev().find(&matches))
+                wrap.then(|| (show.show_diff_offset..length).rev().find(&matches))
                     .flatten()
             })
         };
         if let Some(index) = index {
-            self.show_diff_offset = index;
+            show.show_diff_offset = index;
             self.sync_show_selection_to_diff();
             self.status = format!("Match for `{query}`");
-        } else if !wrap
-            && self
-                .show_diff_lines
-                .iter()
-                .enumerate()
-                .any(|(index, _)| matches(&index))
-        {
-            self.status = if forward { "(END)" } else { "(TOP)" }.into();
         } else {
-            self.status = format!("No match for `{query}`");
+            let has_match = !wrap
+                && show
+                    .show_diff_lines
+                    .iter()
+                    .enumerate()
+                    .any(|(index, _)| matches(&index));
+            self.status = if has_match {
+                if forward { "(END)" } else { "(TOP)" }.into()
+            } else {
+                format!("No match for `{query}`")
+            };
         }
     }
 
     fn submit_command(&mut self, command: &str) {
         match command.trim() {
             "help" | "h" => {
-                self.screen = Screen::Help;
-                self.help_offset = 0;
-                self.help_horizontal_offset = 0;
+                self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
             "quit" | "q" => {
@@ -812,7 +901,9 @@ impl App {
     }
 
     pub fn show_search_query(&self) -> Option<&str> {
-        self.last_show_search.as_deref()
+        self.screen
+            .show()
+            .and_then(|show| show.last_show_search.as_deref())
     }
 }
 
@@ -998,6 +1089,19 @@ mod tests {
     }
 
     #[test]
+    fn help_command_replaces_scrolled_help_with_fresh_state() {
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Help(HelpState {
+            offset: 5,
+            horizontal_offset: 7,
+        });
+
+        app.submit_command("help");
+
+        assert_eq!(app.screen, Screen::Help(HelpState::default()));
+    }
+
+    #[test]
     fn enter_on_log_row_does_nothing() {
         let mut app = App::new(Config::default());
         let mut history = FakeHistory {
@@ -1038,15 +1142,21 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.selected = 1;
+        app.preview_offset = 1;
+        app.preview_horizontal_offset = 2;
+        let log_before = app.log.clone();
         app.dispatch(Action::Help, &mut history);
         app.dispatch(Action::MoveDown, &mut history);
-        assert_eq!(app.help_offset, 1);
+        assert_eq!(app.screen.help().unwrap().offset, 1);
         assert_eq!(app.selected, 1);
         app.dispatch(Action::PageDown, &mut history);
-        assert!(app.help_offset > 1);
+        assert!(app.screen.help().unwrap().offset > 1);
         assert_eq!(app.selected, 1);
         app.dispatch(Action::PageUp, &mut history);
-        assert_eq!(app.help_offset, 1);
+        assert_eq!(app.screen.help().unwrap().offset, 1);
+        app.dispatch(Action::Back, &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.log, log_before);
     }
 
     #[test]
@@ -1069,10 +1179,10 @@ mod tests {
 
         app.dispatch(Action::Help, &mut history);
         app.dispatch(Action::ScrollRight, &mut history);
-        assert_eq!(app.help_horizontal_offset, 2);
+        assert_eq!(app.screen.help().unwrap().horizontal_offset, 2);
         app.dispatch(Action::ScrollLeft, &mut history);
         app.dispatch(Action::ScrollLeft, &mut history);
-        assert_eq!(app.help_horizontal_offset, 0);
+        assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
         assert_eq!(app.selected, 1);
 
         app.dispatch(Action::Back, &mut history);
@@ -1108,9 +1218,9 @@ mod tests {
         app.dispatch(Action::Help, &mut history);
         app.set_horizontal_viewport_width(8);
         app.dispatch(Action::ScrollEnd, &mut history);
-        assert!(app.help_horizontal_offset > 0);
+        assert!(app.screen.help().unwrap().horizontal_offset > 0);
         app.dispatch(Action::ScrollStart, &mut history);
-        assert_eq!(app.help_horizontal_offset, 0);
+        assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
 
         app.dispatch(Action::Back, &mut history);
         app.handle_key(Key::Enter, &mut history);
@@ -1171,9 +1281,12 @@ mod tests {
         app.dispatch(Action::MoveDown, &mut history);
         assert_eq!(app.preview_horizontal_offset, 0);
 
-        app.help_horizontal_offset = 4;
+        app.screen = Screen::Help(HelpState {
+            horizontal_offset: 4,
+            ..HelpState::default()
+        });
         app.dispatch(Action::Help, &mut history);
-        assert_eq!(app.help_horizontal_offset, 0);
+        assert_eq!(app.screen.help().unwrap().horizontal_offset, 0);
     }
 
     #[test]
@@ -1402,7 +1515,7 @@ mod tests {
         assert!(!app.preview_visible);
         assert!(!app.preview_focused);
         app.preview_visible = true;
-        app.screen = Screen::Help;
+        app.screen = Screen::Help(HelpState::default());
         app.handle_key(Key::Enter, &mut history);
         assert!(!app.preview_focused);
         app.screen = Screen::Log;
@@ -1420,31 +1533,34 @@ mod tests {
         };
         app.initialize(&mut history).unwrap();
         app.selected = 1;
+        app.preview_offset = 1;
+        app.preview_horizontal_offset = 2;
+        let log_before = app.log.clone();
         app.dispatch(Action::ShowMode, &mut history);
 
-        assert_eq!(app.screen, Screen::Show);
-        assert_eq!(app.show_focus, ShowFocus::Explorer);
-        assert_eq!(app.show_selected, Some(0));
+        assert!(matches!(app.screen, Screen::Show(_)));
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(0));
         assert_eq!(app.selected, 1);
         assert_eq!(app.status, "");
 
         app.dispatch(Action::MoveDown, &mut history);
-        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
         assert_eq!(app.selected, 1);
         app.handle_key(Key::Enter, &mut history);
-        assert_eq!(app.show_focus, ShowFocus::Diff);
-        assert_eq!(app.show_diff_offset, 4);
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Diff);
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 4);
 
         app.dispatch(Action::MoveDown, &mut history);
-        assert_eq!(app.show_diff_offset, 5);
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
         assert_eq!(app.selected, 1);
         app.handle_key(Key::Escape, &mut history);
-        assert_eq!(app.screen, Screen::Show);
-        assert_eq!(app.show_focus, ShowFocus::Explorer);
-        assert_eq!(app.show_selected, Some(1));
+        assert!(matches!(app.screen, Screen::Show(_)));
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
         app.handle_key(Key::Escape, &mut history);
         assert_eq!(app.screen, Screen::Log);
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.log, log_before);
         assert_eq!(app.status, "");
     }
 
@@ -1462,15 +1578,15 @@ mod tests {
         for _ in 0..3 {
             app.dispatch(Action::MoveDown, &mut history);
         }
-        assert_eq!(app.show_diff_offset, 4);
-        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 4);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
 
         app.dispatch(Action::MoveUp, &mut history);
-        assert_eq!(app.show_diff_offset, 3);
-        assert_eq!(app.show_selected, Some(0));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(0));
         app.dispatch(Action::PageDown, &mut history);
-        assert_eq!(app.show_diff_offset, 5);
-        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
     }
 
     #[test]
@@ -1487,8 +1603,8 @@ mod tests {
         for key in "other".chars().map(Key::Char).chain([Key::Enter]) {
             app.handle_key(key, &mut history);
         }
-        assert_eq!(app.show_diff_offset, 5);
-        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
     }
 
     #[test]
@@ -1512,15 +1628,18 @@ mod tests {
         app.set_horizontal_viewport_width(4);
 
         app.dispatch(Action::PageDown, &mut history);
-        assert_eq!(app.show_selected, Some(10));
-        assert_eq!(app.show_explorer_offset, 10);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(10));
+        assert_eq!(app.screen.show().unwrap().show_explorer_offset, 10);
         app.dispatch(Action::PageDown, &mut history);
-        assert_eq!(app.show_selected, Some(20));
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(20));
         app.dispatch(Action::PageUp, &mut history);
-        assert_eq!(app.show_selected, Some(10));
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(10));
         app.dispatch(Action::ScrollRight, &mut history);
-        assert_eq!(app.show_explorer_horizontal_offset, 2);
-        assert_eq!(app.show_diff_horizontal_offset, 0);
+        assert_eq!(
+            app.screen.show().unwrap().show_explorer_horizontal_offset,
+            2
+        );
+        assert_eq!(app.screen.show().unwrap().show_diff_horizontal_offset, 0);
         assert_eq!(app.selected, 1);
     }
 
@@ -1559,10 +1678,10 @@ mod tests {
         app.dispatch(Action::ShowMode, &mut history);
 
         for (selected, offset) in [(0, 0), (1, 1), (2, 2)] {
-            app.show_selected = Some(selected);
+            app.screen.show_mut().unwrap().show_selected = Some(selected);
             app.handle_key(Key::Enter, &mut history);
-            assert_eq!(app.show_focus, ShowFocus::Diff);
-            assert_eq!(app.show_diff_offset, offset);
+            assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Diff);
+            assert_eq!(app.screen.show().unwrap().show_diff_offset, offset);
             app.handle_key(Key::Escape, &mut history);
         }
     }
@@ -1597,7 +1716,7 @@ mod tests {
         app.dispatch(Action::MoveDown, &mut history);
         app.handle_key(Key::Enter, &mut history);
         assert_eq!(app.status, "");
-        assert_eq!(app.show_diff_offset, 0);
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 0);
     }
 
     #[test]
@@ -1614,21 +1733,25 @@ mod tests {
         for key in "needle".chars().map(Key::Char).chain([Key::Enter]) {
             app.handle_key(key, &mut history);
         }
-        assert_eq!(app.show_diff_offset, 3);
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
         assert_eq!(app.show_search_query(), Some("needle"));
         assert_eq!(app.selected, 0);
-        app.show_diff_lines.push("x".repeat(200));
+        app.screen
+            .show_mut()
+            .unwrap()
+            .show_diff_lines
+            .push("x".repeat(200));
         app.set_horizontal_viewport_width(4);
         app.dispatch(Action::ScrollRight, &mut history);
-        assert_eq!(app.show_diff_horizontal_offset, 2);
+        assert_eq!(app.screen.show().unwrap().show_diff_horizontal_offset, 2);
         assert_eq!(app.log_horizontal_offset, 0);
         app.dispatch(Action::SearchNext, &mut history);
-        assert_eq!(app.show_diff_offset, 5);
-        assert_eq!(app.show_selected, Some(1));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 5);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(1));
         app.dispatch(Action::SearchNext, &mut history);
         assert_eq!(app.status, "(END)");
         app.dispatch(Action::SearchPrevious, &mut history);
-        assert_eq!(app.show_diff_offset, 3);
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
         app.dispatch(Action::SearchPrevious, &mut history);
         assert_eq!(app.status, "(TOP)");
         app.handle_key(Key::Escape, &mut history);
@@ -1636,10 +1759,10 @@ mod tests {
         app.dispatch(Action::MoveDown, &mut history);
         app.dispatch(Action::ShowMode, &mut history);
         assert_eq!(app.selected, 1);
-        assert_eq!(app.show_focus, ShowFocus::Explorer);
-        assert_eq!(app.show_selected, Some(0));
-        assert_eq!(app.show_diff_offset, 0);
-        assert_eq!(app.show_diff_horizontal_offset, 0);
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
+        assert_eq!(app.screen.show().unwrap().show_selected, Some(0));
+        assert_eq!(app.screen.show().unwrap().show_diff_offset, 0);
+        assert_eq!(app.screen.show().unwrap().show_diff_horizontal_offset, 0);
         assert_eq!(app.show_search_query(), None);
     }
 
@@ -1667,9 +1790,9 @@ mod tests {
         app.initialize(&mut empty).unwrap();
         app.dispatch(Action::ShowMode, &mut empty);
         app.handle_key(Key::Enter, &mut empty);
-        assert_eq!(app.screen, Screen::Show);
-        assert_eq!(app.show_selected, None);
-        assert_eq!(app.show_focus, ShowFocus::Explorer);
+        assert!(matches!(app.screen, Screen::Show(_)));
+        assert_eq!(app.screen.show().unwrap().show_selected, None);
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Explorer);
         app.handle_key(Key::Escape, &mut empty);
         assert_eq!(app.screen, Screen::Log);
 

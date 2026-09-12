@@ -38,10 +38,10 @@ pub fn run_script(
 
 pub fn snapshot(app: &App) -> String {
     let mut output = String::new();
-    let screen = match app.screen {
+    let screen = match &app.screen {
         Screen::Log => "log",
-        Screen::Help => "help",
-        Screen::Show => "show",
+        Screen::Help(_) => "help",
+        Screen::Show(_) => "show",
     };
     writeln!(output, "screen={screen}").unwrap();
     writeln!(output, "running={}", app.running).unwrap();
@@ -65,11 +65,14 @@ pub fn snapshot(app: &App) -> String {
     writeln!(
         output,
         "help.horizontal-offset={}",
-        app.help_horizontal_offset
+        match &app.screen {
+            Screen::Help(help) => help.horizontal_offset,
+            _ => 0,
+        }
     )
     .unwrap();
-    if app.screen == Screen::Show {
-        let focus = match app.show_focus {
+    if let Screen::Show(show) = &app.screen {
+        let focus = match show.show_focus {
             ShowFocus::Explorer => "explorer",
             ShowFocus::Diff => "diff",
         };
@@ -77,22 +80,22 @@ pub fn snapshot(app: &App) -> String {
         writeln!(
             output,
             "show.selected={}",
-            app.show_selected
+            show.show_selected
                 .map_or_else(String::new, |selected| selected.to_string())
         )
         .unwrap();
-        writeln!(output, "show.explorer.offset={}", app.show_explorer_offset).unwrap();
+        writeln!(output, "show.explorer.offset={}", show.show_explorer_offset).unwrap();
         writeln!(
             output,
             "show.explorer.horizontal-offset={}",
-            app.show_explorer_horizontal_offset
+            show.show_explorer_horizontal_offset
         )
         .unwrap();
-        writeln!(output, "show.diff.offset={}", app.show_diff_offset).unwrap();
+        writeln!(output, "show.diff.offset={}", show.show_diff_offset).unwrap();
         writeln!(
             output,
             "show.diff.horizontal-offset={}",
-            app.show_diff_horizontal_offset
+            show.show_diff_horizontal_offset
         )
         .unwrap();
     }
@@ -109,19 +112,19 @@ pub fn snapshot(app: &App) -> String {
         writeln!(output, "display=").unwrap();
     }
     writeln!(output, "status={}", app.status.replace('\n', " ")).unwrap();
-    if app.screen == Screen::Help {
+    if matches!(app.screen, Screen::Help(_)) {
         writeln!(output, "help:").unwrap();
         for line in app.config.help_lines() {
             writeln!(output, "  {line}").unwrap();
         }
-    } else if app.screen == Screen::Show {
+    } else if let Screen::Show(show) = &app.screen {
         writeln!(output, "show.metadata:").unwrap();
-        for line in &app.show_metadata {
+        for line in &show.show_metadata {
             writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
         writeln!(output, "show.files:").unwrap();
-        for (index, file) in app.show_files.iter().enumerate() {
-            let marker = if app.show_selected == Some(index) {
+        for (index, file) in show.show_files.iter().enumerate() {
+            let marker = if show.show_selected == Some(index) {
                 '>'
             } else {
                 ' '
@@ -134,7 +137,7 @@ pub fn snapshot(app: &App) -> String {
             .unwrap();
         }
         writeln!(output, "show.diff:").unwrap();
-        for line in &app.show_diff_lines {
+        for line in &show.show_diff_lines {
             writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
     } else {

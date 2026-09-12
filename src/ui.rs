@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Screen, ShowFocus};
+use crate::app::{App, Screen, ShowFocus, ShowState};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -111,8 +111,8 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
-    let pane = match app.screen {
-        Screen::Help => chunks[0],
+    let pane = match &app.screen {
+        Screen::Help(_) => chunks[0],
         Screen::Log if app.preview_visible => {
             let panes = Layout::default()
                 .direction(content_split_direction(chunks[0]))
@@ -125,20 +125,26 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
             }
         }
         Screen::Log => chunks[0],
-        Screen::Show => {
+        Screen::Show(show) => {
             let panes = Layout::default()
                 .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[0]);
-            match app.show_focus {
+            match show.show_focus {
                 ShowFocus::Explorer => panes[0],
                 ShowFocus::Diff => panes[1],
             }
         }
     };
     let marker_width = usize::from(
-        (app.screen == Screen::Log && !app.preview_focused)
-            || (app.screen == Screen::Show && app.show_focus == ShowFocus::Explorer),
+        (matches!(app.screen, Screen::Log) && !app.preview_focused)
+            || matches!(
+                app.screen,
+                Screen::Show(ShowState {
+                    show_focus: ShowFocus::Explorer,
+                    ..
+                })
+            ),
     ) * 2;
     usize::from(pane.width.saturating_sub(2)).saturating_sub(marker_width)
 }
@@ -160,7 +166,7 @@ fn render_with_states(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
-    match app.screen {
+    match &app.screen {
         Screen::Log => {
             let items: Vec<_> = app
                 .records
@@ -214,19 +220,21 @@ fn render_with_states(
                 frame.render_stateful_widget(list, chunks[0], log_state);
             }
         }
-        Screen::Help => {
+        Screen::Help(help) => {
             let text = app.config.help_lines().join("\n");
             frame.render_widget(
                 Paragraph::new(text)
                     .scroll((
-                        app.help_offset.try_into().unwrap_or(u16::MAX),
-                        app.help_horizontal_offset.try_into().unwrap_or(u16::MAX),
+                        help.offset.try_into().unwrap_or(u16::MAX),
+                        help.horizontal_offset.try_into().unwrap_or(u16::MAX),
                     ))
                     .block(Block::default().title(" help ").borders(Borders::ALL)),
                 chunks[0],
             );
         }
-        Screen::Show => render_show(frame, app, chunks[0], show_state),
+        Screen::Show(show) => {
+            render_show(frame, show, app.show_search_query(), chunks[0], show_state)
+        }
     }
 
     let status = app.input_label().unwrap_or_else(|| app.status.clone());
@@ -235,7 +243,8 @@ fn render_with_states(
 
 fn render_show(
     frame: &mut ratatui::Frame<'_>,
-    app: &App,
+    show: &ShowState,
+    search_query: Option<&str>,
     area: ratatui::layout::Rect,
     show_state: &mut ListState,
 ) {
@@ -245,7 +254,7 @@ fn render_show(
         .split(area);
 
     let explorer = panes[0];
-    let metadata_height = app
+    let metadata_height = show
         .show_metadata
         .len()
         .saturating_add(2)
@@ -257,7 +266,7 @@ fn render_show(
         .constraints([Constraint::Length(metadata_height), Constraint::Min(1)])
         .split(explorer);
 
-    let metadata = app
+    let metadata = show
         .show_metadata
         .iter()
         .map(|line| styled_line(line))
@@ -266,7 +275,7 @@ fn render_show(
         Paragraph::new(metadata)
             .scroll((
                 0,
-                app.show_explorer_horizontal_offset
+                show.show_explorer_horizontal_offset
                     .try_into()
                     .unwrap_or(u16::MAX),
             ))
@@ -274,22 +283,22 @@ fn render_show(
         explorer_chunks[0],
     );
 
-    let files = app
+    let files = show
         .show_files
         .iter()
         .map(|file| {
             ListItem::new(scrolled_line(
                 &file.display,
-                app.show_explorer_horizontal_offset,
+                show.show_explorer_horizontal_offset,
                 None,
             ))
         })
         .collect::<Vec<_>>();
-    show_state.select(app.show_selected);
+    show_state.select(show.show_selected);
     let files = List::new(files)
         .block(
             Block::default()
-                .title(if app.show_focus == ShowFocus::Explorer {
+                .title(if show.show_focus == ShowFocus::Explorer {
                     " files (focused) "
                 } else {
                     " files "
@@ -300,22 +309,22 @@ fn render_show(
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(files, explorer_chunks[1], show_state);
 
-    let diff = app
+    let diff = show
         .show_diff_lines
         .iter()
-        .map(|line| highlighted_line(line, app.show_search_query()))
+        .map(|line| highlighted_line(line, search_query))
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(diff)
             .scroll((
-                app.show_diff_offset.try_into().unwrap_or(u16::MAX),
-                app.show_diff_horizontal_offset
+                show.show_diff_offset.try_into().unwrap_or(u16::MAX),
+                show.show_diff_horizontal_offset
                     .try_into()
                     .unwrap_or(u16::MAX),
             ))
             .block(
                 Block::default()
-                    .title(if app.show_focus == ShowFocus::Diff {
+                    .title(if show.show_focus == ShowFocus::Diff {
                         " diff (focused) "
                     } else {
                         " diff "
@@ -656,7 +665,7 @@ mod tests {
     #[test]
     fn active_width_tracks_each_show_pane_and_explorer_marker() {
         let mut app = App::new(Config::default());
-        app.screen = Screen::Show;
+        app.screen = Screen::Show(ShowState::default());
         for area in [
             ratatui::layout::Rect::new(0, 0, 201, 101),
             ratatui::layout::Rect::new(0, 0, 40, 101),
@@ -670,11 +679,11 @@ mod tests {
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(content);
 
-            app.show_focus = ShowFocus::Explorer;
+            app.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
             let explorer_width = usize::from(panes[0].width.saturating_sub(2)).saturating_sub(2);
             assert_eq!(active_content_width(area, &app), explorer_width);
 
-            app.show_focus = ShowFocus::Diff;
+            app.screen.show_mut().unwrap().show_focus = ShowFocus::Diff;
             let diff_width = usize::from(panes[1].width.saturating_sub(2));
             assert_eq!(active_content_width(area, &app), diff_width);
         }
@@ -864,15 +873,16 @@ mod tests {
     #[test]
     fn renders_show_explorer_and_diff_in_both_orientations() {
         let mut app = App::new(Config::default());
-        app.screen = Screen::Show;
-        app.show_metadata = vec!["commit full-id".into(), "Author: Test".into()];
-        app.show_files = vec![ChangedFile {
+        let mut show = ShowState::default();
+        show.show_metadata = vec!["commit full-id".into(), "Author: Test".into()];
+        show.show_files = vec![ChangedFile {
             display: "M src/lib.rs".into(),
             old_path: Some("src/lib.rs".into()),
             new_path: Some("src/lib.rs".into()),
         }];
-        app.show_selected = Some(0);
-        app.show_diff_lines = vec!["diff --git a/src/lib.rs b/src/lib.rs".into()];
+        show.show_selected = Some(0);
+        show.show_diff_lines = vec!["diff --git a/src/lib.rs b/src/lib.rs".into()];
+        app.screen = Screen::Show(show);
         let mut log_state = ListState::default();
         for (width, height, direction) in [
             (80, 10, Direction::Horizontal),
@@ -914,8 +924,9 @@ mod tests {
             }));
         }
 
-        app.show_focus = ShowFocus::Diff;
-        app.show_diff_lines = vec!["\x1b[31mcolored diff\x1b[m".into()];
+        let show = app.screen.show_mut().unwrap();
+        show.show_focus = ShowFocus::Diff;
+        show.show_diff_lines = vec!["\x1b[31mcolored diff\x1b[m".into()];
         let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
         terminal
             .draw(|frame| render(frame, &app, &mut log_state))
@@ -943,9 +954,10 @@ mod tests {
     #[test]
     fn renders_scrolled_show_metadata() {
         let mut app = App::new(Config::default());
-        app.screen = Screen::Show;
-        app.show_metadata = vec!["prefix-hidden metadata".into()];
-        app.show_explorer_horizontal_offset = "prefix-hidden ".len();
+        let mut show = ShowState::default();
+        show.show_metadata = vec!["prefix-hidden metadata".into()];
+        show.show_explorer_horizontal_offset = "prefix-hidden ".len();
+        app.screen = Screen::Show(show);
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal
@@ -1006,7 +1018,7 @@ mod tests {
         let mut app = App::new(Config::default());
         let mut history = Empty;
         app.dispatch(Action::Help, &mut history);
-        app.help_horizontal_offset = "setting.".len();
+        app.screen.help_mut().unwrap().horizontal_offset = "setting.".len();
         let mut log_state = ListState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal

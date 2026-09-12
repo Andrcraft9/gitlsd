@@ -37,8 +37,10 @@ flowchart TD
 - `config` resolves runtime policy and input mappings.
 - `app` is the state machine that owns application state and behavior,
   including the log/preview screen and the full-screen show explorer/diff
-  screen. Show navigation never mutates the log selection, and diff scrolling
-  keeps the explorer selection synchronized with the current patch section.
+  screen. Persistent log and preview state survives screen transitions, while
+  the active-screen enum exclusively owns ephemeral help or show state. Show
+  navigation never mutates the log selection, and diff scrolling keeps the
+  explorer selection synchronized with the current patch section.
 - `git` provides repository data through the Git CLI. Its `ShowData` result
   keeps metadata, fixed name-status rows, and the complete configured diff
   together so the app cannot render mismatched partial show loads.
