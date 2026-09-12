@@ -1,5 +1,5 @@
 ## Review findings
-  1. (Refactoring, High) Screen-specific state is flattened into App.
+  1. (DONE) (Refactoring, High) Screen-specific state is flattened into App.
      src/app.rs:36 contains log, preview, help, and show fields simultaneously, allowing
      meaningless combinations such as show focus while on the log screen. Introduce cohesive
      LogState, HelpState, and ShowState structures, ideally owned by an enum representing the
