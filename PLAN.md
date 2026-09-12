@@ -10,7 +10,7 @@
 - [ ] Preview filter config to support delta
 - [ ] Multi-line log entries: navigate entries not lines
 - [x] Show mode: file explorer, diff per file
-- [ ] Status mode (staged/unstaged changes)
+- [x] Status mode (staged/unstaged changes)
 
 ## Planned: improvements
 (L) - large; (M) - medium; (S) - small.

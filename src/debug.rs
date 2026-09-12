@@ -3,11 +3,11 @@
 //! Script tokens become the same keys used by the interactive frontend and
 //! drive the same [`App`]. The resulting stable, plain-text snapshot avoids a
 //! TTY while preserving the real configuration and Git process boundaries,
-//! including show metadata, file rows, and diff state.
+//! including show and status metadata, file rows, selections, and diff state.
 
 use std::fmt::Write;
 
-use crate::app::{App, Screen, ShowFocus};
+use crate::app::{App, Screen, ShowFocus, StatusFocus, StatusGroup};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -42,6 +42,7 @@ pub fn snapshot(app: &App) -> String {
         Screen::Log => "log",
         Screen::Help(_) => "help",
         Screen::Show(_) => "show",
+        Screen::Status(_) => "status",
     };
     writeln!(output, "screen={screen}").unwrap();
     let log = app.log_state();
@@ -139,6 +140,104 @@ pub fn snapshot(app: &App) -> String {
         }
         writeln!(output, "show.diff:").unwrap();
         for line in show.diff_lines() {
+            writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
+        }
+    } else if let Screen::Status(status) = app.screen() {
+        let focus = match status.focus() {
+            StatusFocus::Explorer => "explorer",
+            StatusFocus::Diff => "diff",
+        };
+        let group = match status.group() {
+            StatusGroup::Staged => "staged",
+            StatusGroup::Unstaged => "unstaged",
+        };
+        writeln!(output, "status.focus={focus}").unwrap();
+        writeln!(output, "status.group={group}").unwrap();
+        writeln!(
+            output,
+            "status.selected={}",
+            status
+                .selected()
+                .map_or_else(String::new, |selected| selected.to_string())
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.staged.selected={}",
+            status
+                .staged_selected()
+                .map_or_else(String::new, |selected| selected.to_string())
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.unstaged.selected={}",
+            status
+                .unstaged_selected()
+                .map_or_else(String::new, |selected| selected.to_string())
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.explorer.offset={}",
+            status.explorer_offset()
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.staged.offset={}",
+            status.staged_explorer_offset()
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.unstaged.offset={}",
+            status.unstaged_explorer_offset()
+        )
+        .unwrap();
+        writeln!(output, "status.diff.offset={}", status.diff_offset()).unwrap();
+        writeln!(
+            output,
+            "status.explorer.horizontal-offset={}",
+            status.explorer_horizontal_offset()
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "status.diff.horizontal-offset={}",
+            status.diff_horizontal_offset()
+        )
+        .unwrap();
+        writeln!(output, "status.staged:").unwrap();
+        for (index, file) in status.staged().iter().enumerate() {
+            let marker = if status.staged_selected() == Some(index) {
+                '>'
+            } else {
+                ' '
+            };
+            writeln!(
+                output,
+                "{marker} {index} {}",
+                crate::git::safe_text(&file.display, false)
+            )
+            .unwrap();
+        }
+        writeln!(output, "status.unstaged:").unwrap();
+        for (index, file) in status.unstaged().iter().enumerate() {
+            let marker = if status.unstaged_selected() == Some(index) {
+                '>'
+            } else {
+                ' '
+            };
+            writeln!(
+                output,
+                "{marker} {index} {}",
+                crate::git::safe_text(&file.display, false)
+            )
+            .unwrap();
+        }
+        writeln!(output, "status.diff:").unwrap();
+        for line in status.diff_lines() {
             writeln!(output, "  {}", crate::git::safe_text(line, false)).unwrap();
         }
     } else {

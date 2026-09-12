@@ -19,6 +19,7 @@ pub enum Action {
     Global(GlobalAction),
     Preview(PreviewAction),
     Show(ShowAction),
+    Status(StatusAction),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -58,8 +59,15 @@ pub enum ShowAction {
     Open,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StatusAction {
+    Open,
+    SwitchGroup,
+    ToggleStage,
+}
+
 impl Action {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
         Self::Navigation(NavigationAction::PageDown),
@@ -77,6 +85,9 @@ impl Action {
         Self::Global(GlobalAction::Quit),
         Self::Preview(PreviewAction::Toggle),
         Self::Show(ShowAction::Open),
+        Self::Status(StatusAction::Open),
+        Self::Status(StatusAction::SwitchGroup),
+        Self::Status(StatusAction::ToggleStage),
     ];
 
     pub const fn name(self) -> &'static str {
@@ -86,6 +97,7 @@ impl Action {
             Self::Global(action) => action.name(),
             Self::Preview(action) => action.name(),
             Self::Show(action) => action.name(),
+            Self::Status(action) => action.name(),
         }
     }
 }
@@ -142,6 +154,16 @@ impl ShowAction {
     }
 }
 
+impl StatusAction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Open => "status-mode",
+            Self::SwitchGroup => "status-switch-group",
+            Self::ToggleStage => "status-toggle-stage",
+        }
+    }
+}
+
 impl FromStr for Action {
     type Err = String;
 
@@ -167,6 +189,7 @@ pub enum Key {
     Escape,
     Enter,
     Backspace,
+    Tab,
     Ctrl(char),
 }
 
@@ -187,6 +210,7 @@ impl Key {
             Self::Escape => "esc".into(),
             Self::Enter => "enter".into(),
             Self::Backspace => "backspace".into(),
+            Self::Tab => "tab".into(),
             Self::Ctrl(value) => format!("ctrl-{value}"),
         }
     }
@@ -208,6 +232,7 @@ impl FromStr for Key {
             "esc" | "escape" => Ok(Self::Escape),
             "enter" | "return" => Ok(Self::Enter),
             "backspace" | "bs" => Ok(Self::Backspace),
+            "tab" => Ok(Self::Tab),
             "space" => Ok(Self::Char(' ')),
             "semicolon" => Ok(Self::Char(';')),
             _ if value.starts_with("ctrl-") && value.chars().count() == 6 => {
@@ -227,6 +252,7 @@ pub struct Config {
     pub preview_command: Vec<String>,
     pub show_commit_command: Vec<String>,
     pub show_command: Vec<String>,
+    pub status_diff_command: Vec<String>,
     pub batch_size: usize,
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
@@ -264,6 +290,9 @@ impl Default for Config {
             (Key::Ctrl('c'), Action::Global(GlobalAction::Quit)),
             (Key::Char('p'), Action::Preview(PreviewAction::Toggle)),
             (Key::Char('d'), Action::Show(ShowAction::Open)),
+            (Key::Char('s'), Action::Status(StatusAction::Open)),
+            (Key::Tab, Action::Status(StatusAction::SwitchGroup)),
+            (Key::Char('u'), Action::Status(StatusAction::ToggleStage)),
         ]
         .into_iter()
         .collect();
@@ -296,6 +325,7 @@ impl Default for Config {
                 "--format=".into(),
                 "--color=always".into(),
             ],
+            status_diff_command: vec!["git".into(), "diff".into(), "--color=always".into()],
             batch_size: 100,
             bindings,
             source: None,
@@ -424,6 +454,10 @@ impl Config {
                 validate_show(values, "show", location)?;
                 self.show_command = values.to_vec();
             }
+            "status-diff" => {
+                validate_status_diff(values, location)?;
+                self.status_diff_command = values.to_vec();
+            }
             _ => {
                 return Err(ConfigError::new(
                     location,
@@ -498,6 +532,14 @@ impl Config {
                     .join(" ")
             ),
             format!(
+                "setting.status-diff={}",
+                self.status_diff_command
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            format!(
                 "setting.config={}",
                 self.source
                     .as_ref()
@@ -518,6 +560,16 @@ fn validate_show(arguments: &[String], setting: &str, location: &str) -> Result<
         return Err(ConfigError::new(
             location,
             format!("required form: `set {setting} git show <options>`"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_status_diff(arguments: &[String], location: &str) -> Result<(), ConfigError> {
+    if arguments.get(..2) != Some(&["git".to_owned(), "diff".to_owned()]) {
+        return Err(ConfigError::new(
+            location,
+            "required form: `set status-diff git diff <options>`",
         ));
     }
     Ok(())
@@ -785,6 +837,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_status_diff_and_status_actions() {
+        let config = Config::parse(
+            "set status-diff = git diff --stat\nbind tab status-switch-group\nbind x status-toggle-stage\n",
+            Path::new("sample.conf"),
+        )
+        .unwrap();
+        assert_eq!(config.status_diff_command, ["git", "diff", "--stat"]);
+        assert_eq!(
+            config.action_for(&Key::Tab),
+            Some(Action::Status(StatusAction::SwitchGroup))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::Status(StatusAction::ToggleStage))
+        );
+        assert!(
+            config
+                .help_lines()
+                .contains(&"setting.status-diff=\"git\" \"diff\" \"--stat\"".into())
+        );
+    }
+
+    #[test]
     fn horizontal_bindings_are_available_by_default_and_configurable() {
         let config = Config::parse(
             "bind x scroll-right\nbind y scroll-left\n",
@@ -847,6 +922,9 @@ mod tests {
             "quit",
             "toggle-preview",
             "show-mode",
+            "status-mode",
+            "status-switch-group",
+            "status-toggle-stage",
         ];
 
         assert_eq!(Action::ALL.len(), names.len());

@@ -19,7 +19,10 @@
 | Ctrl-C | Quit |
 | `p` | Toggle selected-commit preview |
 | `d` | Open selected-commit show mode |
-| Enter | Focus preview or selected show file; Escape backs out one focus level |
+| `s` | Open or close working-tree status mode |
+| Tab | Switch between staged and unstaged status groups |
+| `u` | Stage the selected unstaged file or unstage the selected staged file |
+| Enter | Focus preview, show file, or status diff; Escape backs out one focus level |
 
 Commands are `:help`/`:h` and `:quit`/`:q`. An empty or unknown command is reported in the status line.
 
@@ -35,6 +38,7 @@ set batch-size = 100
 set preview = git show --stat --patch
 set show-commit = git show --no-patch
 set show = git show --patch --format=
+set status-diff = git diff --color=always
 bind j move-down
 bind x quit
 bind semicolon command
@@ -44,7 +48,7 @@ bind semicolon command
 
 Each row must represent one commit. Multiline formats and graph, stat, patch, notes, and signature output are rejected with a configuration error; use `--oneline` or a one-line `--format`. A companion query retrieves stable commit IDs using the same history selection and pagination. Search matches displayed text. Git ANSI SGR colors are rendered interactively and stripped from deterministic debug output; other terminal controls are neutralized.
 
-Keys are a single character or one of `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `scroll-start`, `scroll-end`, `scroll-right`, `scroll-left`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, `toggle-preview`, and `show-mode`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every configured argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
+Keys are a single character or one of `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `esc`, `space`, `semicolon`, `tab`, and `ctrl-<character>`. Available actions are `move-down`, `move-up`, `page-down`, `page-up`, `scroll-start`, `scroll-end`, `scroll-right`, `scroll-left`, `search`, `search-next`, `search-previous`, `command`, `help`, `back`, `quit`, `toggle-preview`, `show-mode`, `status-mode`, `status-switch-group`, and `status-toggle-stage`. Enter and Backspace are reserved for text entry. Help displays all effective settings and bindings, including defaults. It quotes every configured argv element reversibly so empty and whitespace-containing arguments remain distinguishable.
 
 The interactive frontend leaves mouse input to the terminal. Drag-select any currently rendered log, preview, show, help, status, or input text and use the terminal's ordinary copy operation. Mouse-wheel and touchpad scrolling are likewise terminal-owned; because gitlsd uses the alternate screen, that may not provide normal scrollback. Use the configured keyboard controls to scroll gitlsd panes.
 
@@ -52,6 +56,8 @@ The selected commit preview is visible by default. It runs `git show --stat --pa
 The preview is placed beside the log only when the terminal is sufficiently wide; otherwise it is stacked below the log. The automatic choice accounts for the rectangular shape of terminal cells.
 
 Press `d` to open full-screen show mode for the selected commit. Show mode places configurable commit metadata and a fixed Git name-status file list (`M path`, `R100 old-path new-path`, and so on) beside the complete configured diff, using the same automatic split rule as the preview. The file list is focused first; Enter focuses the diff at the selected file's patch header, and scrolling the diff keeps the explorer selection on the current file. Escape returns from the diff to the file list and then to the log. `set show-commit git show ...` and `set show git show ...` customize the metadata and diff commands independently; both receive the selected full commit ID.
+
+Press `s` to open full-screen status mode. It shows staged and unstaged file lists stacked evenly in the explorer pane beside the complete diff for the active group, using the same automatic split rule as the preview and show modes. Status discovery always uses Git porcelain v1 NUL output, so untracked files are listed and raw paths are kept for mutations. Enter focuses the active group's diff; scrolling and searching it keep the matching file selected. `u` performs a whole-file stage or unstage operation and refreshes both groups and diffs. Status mode works before the first commit, and it preserves the log selection when it closes. Only the diff presentation is configurable with `set status-diff git diff ...`; discovery and mutations use fixed Git commands.
 
 Invalid configuration reports its file, line, and reason.
 

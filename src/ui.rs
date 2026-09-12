@@ -1,7 +1,7 @@
 //! Interactive terminal frontend.
 //!
 //! This module translates Crossterm events into shared keys, drives [`App`],
-//! and renders log, preview, help, and show state with Ratatui. It also owns
+//! and renders log, preview, help, show, and status state with Ratatui. It also owns
 //! setup and restoration of the terminal session.
 
 use std::io::{self, Stdout, Write};
@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Screen, ShowFocus, ShowState};
+use crate::app::{App, Screen, ShowFocus, ShowState, StatusFocus, StatusGroup, StatusState};
 use crate::config::Key;
 use crate::git::HistorySource;
 
@@ -32,10 +32,17 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
     let mut session = TerminalSession::start()?;
     let mut log_state = ListState::default();
     let mut show_state = ListState::default();
+    let mut status_states = [ListState::default(), ListState::default()];
     while app.is_running() {
-        session
-            .terminal
-            .draw(|frame| render_with_states(frame, app, &mut log_state, &mut show_state))?;
+        session.terminal.draw(|frame| {
+            render_with_states(
+                frame,
+                app,
+                &mut log_state,
+                &mut show_state,
+                &mut status_states,
+            )
+        })?;
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
@@ -135,12 +142,26 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
                 ShowFocus::Diff => panes[1],
             }
         }
+        Screen::Status(status) => {
+            let panes = Layout::default()
+                .direction(content_split_direction(chunks[0]))
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[0]);
+            match status.focus() {
+                StatusFocus::Explorer => panes[0],
+                StatusFocus::Diff => panes[1],
+            }
+        }
     };
     let marker_width = usize::from(
         (matches!(app.screen(), Screen::Log) && !app.log_state().preview_focused())
             || matches!(
                 app.screen(),
                 Screen::Show(show) if show.focus() == ShowFocus::Explorer
+            )
+            || matches!(
+                app.screen(),
+                Screen::Status(status) if status.focus() == StatusFocus::Explorer
             ),
     ) * 2;
     usize::from(pane.width.saturating_sub(2)).saturating_sub(marker_width)
@@ -149,7 +170,8 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
 #[cfg(test)]
 fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) {
     let mut show_state = ListState::default();
-    render_with_states(frame, app, log_state, &mut show_state);
+    let mut status_states = [ListState::default(), ListState::default()];
+    render_with_states(frame, app, log_state, &mut show_state, &mut status_states);
 }
 
 fn render_with_states(
@@ -157,6 +179,7 @@ fn render_with_states(
     app: &App,
     log_state: &mut ListState,
     show_state: &mut ListState,
+    status_states: &mut [ListState; 2],
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -236,6 +259,13 @@ fn render_with_states(
         Screen::Show(show) => {
             render_show(frame, show, app.show_search_query(), chunks[0], show_state)
         }
+        Screen::Status(status) => render_status(
+            frame,
+            status,
+            app.status_search_query(),
+            chunks[0],
+            status_states,
+        ),
     }
 
     let status = app.input_label().unwrap_or_else(|| app.status().to_owned());
@@ -324,6 +354,117 @@ fn render_show(
             .block(
                 Block::default()
                     .title(if show.focus() == ShowFocus::Diff {
+                        " diff (focused) "
+                    } else {
+                        " diff "
+                    })
+                    .borders(Borders::ALL),
+            ),
+        panes[1],
+    );
+}
+
+fn render_status(
+    frame: &mut ratatui::Frame<'_>,
+    status: &StatusState,
+    search_query: Option<&str>,
+    area: ratatui::layout::Rect,
+    status_states: &mut [ListState; 2],
+) {
+    let panes = Layout::default()
+        .direction(content_split_direction(area))
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let explorer_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(panes[0]);
+
+    let staged_items = status
+        .staged()
+        .iter()
+        .map(|file| {
+            ListItem::new(scrolled_line(
+                &file.display,
+                status.explorer_horizontal_offset(),
+                None,
+            ))
+        })
+        .collect::<Vec<_>>();
+    status_states[0].select(
+        (status.group() == StatusGroup::Staged)
+            .then_some(status.staged_selected())
+            .flatten(),
+    );
+    let staged = List::new(staged_items)
+        .block(
+            Block::default()
+                .title(
+                    if status.focus() == StatusFocus::Explorer
+                        && status.group() == StatusGroup::Staged
+                    {
+                        " staged (focused) "
+                    } else {
+                        " staged "
+                    },
+                )
+                .borders(Borders::ALL),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(staged, explorer_chunks[0], &mut status_states[0]);
+
+    let unstaged_items = status
+        .unstaged()
+        .iter()
+        .map(|file| {
+            ListItem::new(scrolled_line(
+                &file.display,
+                status.explorer_horizontal_offset(),
+                None,
+            ))
+        })
+        .collect::<Vec<_>>();
+    status_states[1].select(
+        (status.group() == StatusGroup::Unstaged)
+            .then_some(status.unstaged_selected())
+            .flatten(),
+    );
+    let unstaged = List::new(unstaged_items)
+        .block(
+            Block::default()
+                .title(
+                    if status.focus() == StatusFocus::Explorer
+                        && status.group() == StatusGroup::Unstaged
+                    {
+                        " unstaged (focused) "
+                    } else {
+                        " unstaged "
+                    },
+                )
+                .borders(Borders::ALL),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(unstaged, explorer_chunks[1], &mut status_states[1]);
+
+    let diff = status
+        .diff_lines()
+        .iter()
+        .map(|line| highlighted_line(line, search_query))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(diff)
+            .scroll((
+                status.diff_offset().try_into().unwrap_or(u16::MAX),
+                status
+                    .diff_horizontal_offset()
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+            ))
+            .block(
+                Block::default()
+                    .title(if status.focus() == StatusFocus::Diff {
                         " diff (focused) "
                     } else {
                         " diff "
@@ -568,6 +709,7 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::Tab => Some(Key::Tab),
         _ => None,
     }
 }
@@ -578,8 +720,11 @@ mod tests {
 
     use crate::config::{
         Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, ShowAction,
+        StatusAction,
     };
-    use crate::git::{ChangedFile, CommitRecord, GitError, HistorySource, ShowData};
+    use crate::git::{
+        ChangedFile, CommitRecord, GitError, HistorySource, ShowData, StatusData, StatusFile,
+    };
 
     use super::*;
 
@@ -587,6 +732,7 @@ mod tests {
         records: Vec<CommitRecord>,
         preview: Vec<String>,
         show: ShowData,
+        status: StatusData,
     }
 
     impl HistorySource for FixtureHistory {
@@ -607,6 +753,10 @@ mod tests {
         fn load_show(&mut self, _id: &str) -> Result<ShowData, GitError> {
             Ok(self.show.clone())
         }
+
+        fn load_status(&mut self) -> Result<StatusData, GitError> {
+            Ok(self.status.clone())
+        }
     }
 
     fn app_with_history(
@@ -619,6 +769,7 @@ mod tests {
             records,
             preview,
             show,
+            status: StatusData::default(),
         };
         app.initialize(&mut history).unwrap();
         (app, history)
@@ -663,6 +814,7 @@ mod tests {
             (KeyCode::Esc, KeyModifiers::NONE, Some(Key::Escape)),
             (KeyCode::Enter, KeyModifiers::NONE, Some(Key::Enter)),
             (KeyCode::Backspace, KeyModifiers::NONE, Some(Key::Backspace)),
+            (KeyCode::Tab, KeyModifiers::NONE, Some(Key::Tab)),
             (
                 KeyCode::Char('c'),
                 KeyModifiers::CONTROL,
@@ -1028,6 +1180,87 @@ mod tests {
                 .buffer()
                 .cell((panes[1].x + 1, panes[1].y + 1))
                 .expect("styled diff line")
+                .style()
+                .fg,
+            Some(Color::Indexed(1))
+        );
+    }
+
+    #[test]
+    fn renders_status_groups_and_diff_in_both_orientations() {
+        let mut app = App::new(Config::default());
+        let mut history = FixtureHistory {
+            records: vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            preview: Vec::new(),
+            show: ShowData::default(),
+            status: StatusData {
+                staged: vec![StatusFile {
+                    display: "M  staged.rs".into(),
+                    old_path: Some(b"staged.rs".to_vec()),
+                    new_path: Some(b"staged.rs".to_vec()),
+                }],
+                unstaged: vec![StatusFile {
+                    display: "?? untracked.rs".into(),
+                    old_path: None,
+                    new_path: Some(b"untracked.rs".to_vec()),
+                }],
+                staged_diff: vec!["\x1b[31mdiff --git a/staged.rs b/staged.rs\x1b[m".into()],
+                unstaged_diff: vec!["untracked output".into()],
+            },
+        };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::Status(StatusAction::Open), &mut history);
+        let mut log_state = ListState::default();
+        for (width, height, direction) in [
+            (80, 10, Direction::Horizontal),
+            (30, 20, Direction::Vertical),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, &mut log_state))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("staged"));
+            assert!(text.contains("unstaged"));
+            assert!(text.contains("untracked output"));
+            assert!(text.contains("focused"));
+            let panes = Layout::default()
+                .direction(direction)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((panes[1].x + 2, panes[1].y))
+                    .expect("status diff title")
+                    .symbol(),
+                "d"
+            );
+        }
+
+        app.handle_key(Key::Tab, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("diff (focused)"));
+        assert!(text.contains("diff --git a/staged.rs b/staged.rs"));
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(ratatui::layout::Rect::new(0, 0, 80, 9));
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((panes[1].x + 1, panes[1].y + 1))
+                .expect("styled status diff line")
                 .style()
                 .fg,
             Some(Color::Indexed(1))

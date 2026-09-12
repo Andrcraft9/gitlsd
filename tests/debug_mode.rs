@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
 fn fixture() -> PathBuf {
@@ -78,6 +83,22 @@ fn git(directory: &Path, arguments: &[&str]) {
     );
 }
 
+fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?}: {}",
+        arguments,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
 fn show_fixture() -> PathBuf {
     let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
@@ -106,6 +127,83 @@ fn show_fixture() -> PathBuf {
     fs::write(directory.join("added name.txt"), "added\n").unwrap();
     git(&directory, &["add", "-A"]);
     git(&directory, &["commit", "-qm", "variants"]);
+    directory
+}
+
+fn status_fixture() -> PathBuf {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "gitlsd-status-fixture-{}-{index}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    git(&directory, &["init", "-q"]);
+    git(&directory, &["config", "user.email", "gitlsd@example.com"]);
+    git(&directory, &["config", "user.name", "gitlsd"]);
+    fs::write(directory.join("partial.txt"), "base\n").unwrap();
+    fs::write(directory.join("staged.txt"), "base\n").unwrap();
+    fs::write(directory.join("rename source.txt"), "rename\n").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "base"]);
+
+    fs::write(directory.join("partial.txt"), "index\n").unwrap();
+    git(&directory, &["add", "--", "partial.txt"]);
+    fs::write(directory.join("partial.txt"), "index\nworktree\n").unwrap();
+    fs::write(directory.join("staged.txt"), "staged\n").unwrap();
+    git(&directory, &["add", "--", "staged.txt"]);
+    git(
+        &directory,
+        &["mv", "rename source.txt", "renamed target.txt"],
+    );
+    fs::write(directory.join("untracked file.txt"), "untracked\n").unwrap();
+    directory
+}
+
+#[cfg(unix)]
+fn special_status_fixture() -> (PathBuf, OsString) {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "gitlsd-special-status-fixture-{}-{index}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    git(&directory, &["init", "-q"]);
+    git(&directory, &["config", "user.email", "gitlsd@example.com"]);
+    git(&directory, &["config", "user.name", "gitlsd"]);
+    fs::write(directory.join("base.txt"), "base\n").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "base"]);
+    let name = OsString::from_vec(b"control\tname-\xff*.txt".to_vec());
+    fs::write(directory.join(&name), "special\n").unwrap();
+    (directory, name)
+}
+
+fn unborn_fixture() -> PathBuf {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "gitlsd-unborn-fixture-{}-{index}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    git(&directory, &["init", "-q"]);
+    fs::write(directory.join("worktree.txt"), "worktree\n").unwrap();
+    directory
+}
+
+fn deletion_status_fixture() -> PathBuf {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "gitlsd-deletion-status-fixture-{}-{index}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    git(&directory, &["init", "-q"]);
+    git(&directory, &["config", "user.email", "gitlsd@example.com"]);
+    git(&directory, &["config", "user.name", "gitlsd"]);
+    fs::write(directory.join("deleted.txt"), "delete me\n").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "base"]);
+    fs::remove_file(directory.join("deleted.txt")).unwrap();
     directory
 }
 
@@ -529,4 +627,271 @@ fn show_diff_failure_is_reported_without_entering_partial_show_mode() {
     let output = stdout(run("d", "set show git show --not-a-real-option\n"));
     assert!(output.contains("screen=log\n"));
     assert!(output.contains("status=Could not load show: Git show diff failed:"));
+}
+
+#[test]
+fn status_lists_both_groups_and_keeps_the_complete_active_diff() {
+    let directory = status_fixture();
+    let output = stdout(run_in(&directory, "s", ""));
+
+    assert!(output.contains("screen=status\n"));
+    assert!(output.contains("status.focus=explorer\n"));
+    assert!(output.contains("status.group=unstaged\n"));
+    assert!(output.contains("MM partial.txt\n"));
+    assert!(output.contains("M  staged.txt\n"));
+    assert!(output.contains("R  rename source.txt -> renamed target.txt\n"));
+    assert!(output.contains("?? untracked file.txt\n"));
+    assert!(output.matches("MM partial.txt\n").count() >= 2);
+    assert!(output.contains("diff --git a/partial.txt b/partial.txt"));
+    assert!(!output.contains("diff --git a/staged.txt b/staged.txt"));
+
+    let focused = stdout(run_in(&directory, "s;enter;down", ""));
+    assert!(focused.contains("status.focus=diff\n"));
+    assert!(focused.contains("status.selected=0\n"));
+    assert!(focused.contains("status.diff.offset=1\n"));
+
+    let untracked = stdout(run_in(&directory, "s;down;enter", ""));
+    assert!(untracked.contains("status.focus=diff\n"));
+    assert!(untracked.contains("status=Patch location unavailable for"));
+}
+
+#[test]
+fn status_uses_the_staged_diff_and_syncs_selection_across_multiple_patches() {
+    let directory = status_fixture();
+    let focused = stdout(run_in(&directory, "s;tab;down;enter", ""));
+    assert!(focused.contains("status.focus=diff\n"));
+    assert!(focused.contains("status.group=staged\n"));
+    assert!(focused.contains("status.selected=1\n"));
+    assert!(focused.contains("M  staged.txt\n"));
+    assert!(focused.contains("diff --git a/staged.txt b/staged.txt"));
+
+    let searched = stdout(run_in(&directory, "s;tab;enter;/;s;t;a;g;e;d;enter", ""));
+    assert!(searched.contains("status.group=staged\n"));
+    assert!(searched.contains("status.selected=2\n"));
+    assert!(searched.contains("status.staged.selected=2\n"));
+    assert!(searched.contains("status=Match for `staged`\n"));
+}
+
+#[test]
+fn status_closes_back_to_the_same_log_selection() {
+    let output = stdout(run("down;s;s", ""));
+    assert!(output.contains("screen=log\n"));
+    assert!(output.contains("selected=1\n"));
+    assert!(output.contains("commit=aaed0069a29bd77ca37a12f4477b41eb3fa9572f\n"));
+}
+
+#[test]
+fn status_close_preserves_log_preview_state() {
+    let output = stdout(run_preview("s;s", ""));
+    assert!(output.contains("screen=log\n"));
+    assert!(output.contains("preview.visible=true\n"));
+    assert!(output.contains("preview.focused=false\n"));
+}
+
+#[test]
+fn status_renders_empty_groups_in_a_clean_repository() {
+    let directory = show_fixture();
+    let output = stdout(run_in(&directory, "s", ""));
+    assert!(output.contains("screen=status\n"));
+    assert!(output.contains("status.selected=\n"));
+    assert!(output.contains("status.staged.selected=\n"));
+    assert!(output.contains("status.unstaged.selected=\n"));
+    assert!(output.contains("status.staged:\n"));
+    assert!(output.contains("status.unstaged:\n"));
+    assert!(output.contains("status.diff:\n"));
+}
+
+#[test]
+fn status_diff_search_keeps_the_active_file_selected() {
+    let directory = status_fixture();
+    let output = stdout(run_in(&directory, "s;enter;/;w;o;r;k;t;r;e;e;enter", ""));
+    assert!(output.contains("status.focus=diff\n"));
+    assert!(output.contains("status.selected=0\n"));
+    assert!(output.contains("status=Match for `worktree`\n"));
+    assert!(output.contains("+worktree"));
+}
+
+#[test]
+fn status_reads_and_mutates_from_the_repository_root_when_started_in_a_subdirectory() {
+    let directory = status_fixture();
+    let subdirectory = directory.join("nested");
+    fs::create_dir_all(&subdirectory).unwrap();
+
+    let output = stdout(run_in(&subdirectory, "s;u", ""));
+    assert!(output.contains("M  partial.txt\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .any(|name| name == b"partial.txt")
+    );
+}
+
+#[test]
+fn status_diff_is_configurable_but_discovery_remains_fixed() {
+    let directory = status_fixture();
+    let output = stdout(run_in(&directory, "s", "set status-diff git diff --stat\n"));
+    assert!(output.contains("status.unstaged:\n"));
+    assert!(output.contains("file changed") || output.contains("files changed"));
+
+    let missing_header = stdout(run_in(
+        &directory,
+        "s;enter",
+        "set status-diff git diff --no-patch\n",
+    ));
+    assert!(missing_header.contains("status.focus=diff\n"));
+    assert!(missing_header.contains("status=Patch location unavailable for"));
+    assert!(missing_header.contains("MM partial.txt\n"));
+}
+
+#[test]
+fn status_stages_and_unstages_whole_files_without_changing_worktree_bytes() {
+    let directory = status_fixture();
+    let path = directory.join("partial.txt");
+    let before = fs::read(&path).unwrap();
+
+    let staged = stdout(run_in(&directory, "s;u", ""));
+    assert!(staged.contains("status.staged:\n"));
+    assert!(staged.contains("M  partial.txt\n"));
+    assert!(!staged.contains("MM partial.txt\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .any(|name| name == b"partial.txt")
+    );
+    assert!(
+        git_output(&directory, &["diff", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .all(|name| name != b"partial.txt")
+    );
+    assert!(staged.contains("M  staged.txt\n"));
+    assert!(staged.contains("R  rename source.txt -> renamed target.txt\n"));
+    assert!(staged.contains("?? untracked file.txt\n"));
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    let unstaged = stdout(run_in(&directory, "s;tab;u", ""));
+    assert!(unstaged.contains(" M partial.txt\n"));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .all(|name| name != b"partial.txt")
+    );
+    assert!(unstaged.contains(" M partial.txt\n"));
+    assert!(unstaged.contains("M  staged.txt\n"));
+    assert!(unstaged.contains("R  rename source.txt -> renamed target.txt\n"));
+    assert!(unstaged.contains("?? untracked file.txt\n"));
+}
+
+#[test]
+fn status_mutations_work_from_diff_focus() {
+    let directory = status_fixture();
+    let path = directory.join("partial.txt");
+    let output = stdout(run_in(&directory, "s;enter;u", ""));
+    assert!(output.contains("status.focus=diff\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .any(|name| name == b"partial.txt")
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"index\nworktree\n");
+
+    let directory = status_fixture();
+    let output = stdout(run_in(&directory, "s;tab;enter;u", ""));
+    assert!(output.contains("status.focus=diff\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .all(|name| name != b"partial.txt")
+    );
+}
+
+#[test]
+fn status_mutates_deleted_files_without_touching_worktree_paths() {
+    let directory = deletion_status_fixture();
+    let output = stdout(run_in(&directory, "s;u", ""));
+    assert!(output.contains("status.staged:\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-status"])
+            .windows(b"D\tdeleted.txt".len())
+            .any(|row| row == b"D\tdeleted.txt")
+    );
+    assert!(!directory.join("deleted.txt").exists());
+
+    let output = stdout(run_in(&directory, "s;tab;u", ""));
+    assert!(output.contains("status.unstaged:\n"));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .split(|byte| *byte == b'\n')
+            .all(|name| name != b"deleted.txt")
+    );
+    assert!(!directory.join("deleted.txt").exists());
+}
+
+#[test]
+fn status_unstages_renames_using_both_raw_endpoints() {
+    let directory = status_fixture();
+    let output = stdout(run_in(&directory, "s;tab;down;u", ""));
+    assert!(output.contains("status.group=staged\n"));
+    assert!(!output.contains("R  rename source.txt -> renamed target.txt\n"));
+
+    let cached = git_output(&directory, &["diff", "--cached", "--name-only"]);
+    assert!(
+        !cached
+            .split(|byte| *byte == b'\n')
+            .any(|path| path == b"rename source.txt" || path == b"renamed target.txt")
+    );
+    assert!(!directory.join("rename source.txt").exists());
+    assert_eq!(
+        fs::read(directory.join("renamed target.txt")).unwrap(),
+        b"rename\n"
+    );
+}
+
+#[test]
+fn status_handles_unborn_repositories_and_preserves_untracked_contents() {
+    let directory = unborn_fixture();
+    let path = directory.join("worktree.txt");
+    let before = fs::read(&path).unwrap();
+
+    let output = stdout(run_in(&directory, "s", ""));
+    assert!(output.contains("screen=status\n"));
+    assert!(output.contains("loaded=0\n"));
+    assert!(output.contains("?? worktree.txt\n"));
+
+    let staged = stdout(run_in(&directory, "s;u", ""));
+    assert!(staged.contains("A  worktree.txt\n"));
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    fs::write(&path, "changed after staging\n").unwrap();
+
+    let unstaged = stdout(run_in(&directory, "s;tab;u", ""));
+    assert!(unstaged.contains("?? worktree.txt\n"));
+    assert_eq!(fs::read(&path).unwrap(), b"changed after staging\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn status_mutations_use_exact_special_paths() {
+    let (directory, name) = special_status_fixture();
+    let before = fs::read(directory.join(&name)).unwrap();
+    let output = stdout(run_in(&directory, "s;u", ""));
+    assert!(output.contains("status.staged:\n"));
+    assert_eq!(fs::read(directory.join(&name)).unwrap(), before);
+
+    let tracked = git_output(&directory, &["ls-files", "-z"]);
+    assert!(
+        tracked
+            .split(|byte| *byte == 0)
+            .any(|path| path == name.as_encoded_bytes())
+    );
+
+    let output = stdout(run_in(&directory, "s;tab;u", ""));
+    assert!(output.contains("status.unstaged:\n"));
+    assert_eq!(fs::read(directory.join(&name)).unwrap(), before);
+    let tracked = git_output(&directory, &["ls-files", "-z"]);
+    assert!(
+        !tracked
+            .split(|byte| *byte == 0)
+            .any(|path| path == name.as_encoded_bytes())
+    );
 }

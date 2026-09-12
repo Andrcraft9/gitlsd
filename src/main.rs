@@ -26,12 +26,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
     let directory = current_directory()?;
-    let mut source = GitHistory::new(
+    let mut source = GitHistory::with_status_diff(
         directory,
         config.log_command.clone(),
         config.preview_command.clone(),
         config.show_commit_command.clone(),
         config.show_command.clone(),
+        config.status_diff_command.clone(),
     );
     let mut app = App::new(config);
     app.initialize(&mut source)?;

@@ -1,15 +1,17 @@
 //! Application state machine and behavior.
 //!
-//! [`App`] owns persistent log state plus enum-scoped help and show state,
+//! [`App`] owns persistent log state plus enum-scoped help, show, and status state,
 //! input modes, commands, and shutdown intent.
 
 use std::collections::HashSet;
 
 use crate::config::{
     Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, SearchAction, ShowAction,
+    StatusAction,
 };
 use crate::git::{
-    ChangedFile, CommitRecord, GitError, HistorySource, file_at_patch_offset, patch_offset,
+    ChangedFile, CommitRecord, GitError, HistorySource, StatusData, StatusFile,
+    file_at_patch_offset, patch_offset, status_file_at_patch_offset, status_patch_offset,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -19,6 +21,7 @@ pub enum Screen {
     Log,
     Help(HelpState),
     Show(ShowState),
+    Status(StatusState),
 }
 
 impl Screen {
@@ -49,6 +52,20 @@ impl Screen {
             _ => None,
         }
     }
+
+    pub fn status(&self) -> Option<&StatusState> {
+        match self {
+            Self::Status(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn status_mut(&mut self) -> Option<&mut StatusState> {
+        match self {
+            Self::Status(state) => Some(state),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +75,24 @@ pub enum ShowFocus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusFocus {
+    Explorer,
+    Diff,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusGroup {
+    Staged,
+    Unstaged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActivePane {
     Log,
     Preview,
     Help,
     Show(ShowFocus),
+    Status(StatusFocus),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +141,27 @@ pub struct ShowState {
     last_show_search: Option<String>,
 }
 
+/// Explorer, diff, and search state that exists only while status is active.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusState {
+    status_focus: StatusFocus,
+    active_group: StatusGroup,
+    staged: Vec<StatusFile>,
+    unstaged: Vec<StatusFile>,
+    staged_diff: Vec<String>,
+    unstaged_diff: Vec<String>,
+    staged_selected: Option<usize>,
+    unstaged_selected: Option<usize>,
+    staged_explorer_offset: usize,
+    unstaged_explorer_offset: usize,
+    staged_diff_offset: usize,
+    unstaged_diff_offset: usize,
+    staged_diff_horizontal_offset: usize,
+    unstaged_diff_horizontal_offset: usize,
+    explorer_horizontal_offset: usize,
+    last_search: Option<String>,
+}
+
 impl Default for ShowState {
     fn default() -> Self {
         Self {
@@ -124,6 +175,29 @@ impl Default for ShowState {
             show_diff_offset: 0,
             show_diff_horizontal_offset: 0,
             last_show_search: None,
+        }
+    }
+}
+
+impl Default for StatusState {
+    fn default() -> Self {
+        Self {
+            status_focus: StatusFocus::Explorer,
+            active_group: StatusGroup::Unstaged,
+            staged: Vec::new(),
+            unstaged: Vec::new(),
+            staged_diff: Vec::new(),
+            unstaged_diff: Vec::new(),
+            staged_selected: None,
+            unstaged_selected: None,
+            staged_explorer_offset: 0,
+            unstaged_explorer_offset: 0,
+            staged_diff_offset: 0,
+            unstaged_diff_offset: 0,
+            staged_diff_horizontal_offset: 0,
+            unstaged_diff_horizontal_offset: 0,
+            explorer_horizontal_offset: 0,
+            last_search: None,
         }
     }
 }
@@ -210,6 +284,101 @@ impl ShowState {
     }
 }
 
+impl StatusState {
+    fn from_data(data: StatusData) -> Self {
+        let staged_selected = (!data.staged.is_empty()).then_some(0);
+        let unstaged_selected = (!data.unstaged.is_empty()).then_some(0);
+        Self {
+            staged: data.staged,
+            unstaged: data.unstaged,
+            staged_diff: data.staged_diff,
+            unstaged_diff: data.unstaged_diff,
+            staged_selected,
+            unstaged_selected,
+            ..Self::default()
+        }
+    }
+
+    pub fn focus(&self) -> StatusFocus {
+        self.status_focus
+    }
+
+    pub fn group(&self) -> StatusGroup {
+        self.active_group
+    }
+
+    pub fn staged(&self) -> &[StatusFile] {
+        &self.staged
+    }
+
+    pub fn unstaged(&self) -> &[StatusFile] {
+        &self.unstaged
+    }
+
+    pub fn staged_diff(&self) -> &[String] {
+        &self.staged_diff
+    }
+
+    pub fn unstaged_diff(&self) -> &[String] {
+        &self.unstaged_diff
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        match self.active_group {
+            StatusGroup::Staged => self.staged_selected,
+            StatusGroup::Unstaged => self.unstaged_selected,
+        }
+    }
+
+    pub fn staged_selected(&self) -> Option<usize> {
+        self.staged_selected
+    }
+
+    pub fn unstaged_selected(&self) -> Option<usize> {
+        self.unstaged_selected
+    }
+
+    pub fn explorer_offset(&self) -> usize {
+        match self.active_group {
+            StatusGroup::Staged => self.staged_explorer_offset,
+            StatusGroup::Unstaged => self.unstaged_explorer_offset,
+        }
+    }
+
+    pub fn staged_explorer_offset(&self) -> usize {
+        self.staged_explorer_offset
+    }
+
+    pub fn unstaged_explorer_offset(&self) -> usize {
+        self.unstaged_explorer_offset
+    }
+
+    pub fn explorer_horizontal_offset(&self) -> usize {
+        self.explorer_horizontal_offset
+    }
+
+    pub fn diff_offset(&self) -> usize {
+        match self.active_group {
+            StatusGroup::Staged => self.staged_diff_offset,
+            StatusGroup::Unstaged => self.unstaged_diff_offset,
+        }
+    }
+
+    pub fn diff_horizontal_offset(&self) -> usize {
+        match self.active_group {
+            StatusGroup::Staged => self.staged_diff_horizontal_offset,
+            StatusGroup::Unstaged => self.unstaged_diff_horizontal_offset,
+        }
+    }
+
+    pub fn diff_lines(&self) -> &[String] {
+        match self.active_group {
+            StatusGroup::Staged => &self.staged_diff,
+            StatusGroup::Unstaged => &self.unstaged_diff,
+        }
+    }
+}
+
 pub struct App {
     config: Config,
     log: LogState,
@@ -247,7 +416,13 @@ impl App {
     }
 
     pub fn initialize(&mut self, source: &mut impl HistorySource) -> Result<(), GitError> {
-        self.fetch_more(source)?;
+        match self.fetch_more(source) {
+            Ok(()) => {}
+            Err(GitError::Unborn) => {
+                self.log.has_more = false;
+            }
+            Err(error) => return Err(error),
+        }
         self.reload_preview(source);
         if self.log.records.is_empty() {
             self.status = "No commits found".into();
@@ -304,6 +479,14 @@ impl App {
                         })
                     ) {
                         self.focus_show_diff();
+                    } else if matches!(
+                        self.screen,
+                        Screen::Status(StatusState {
+                            status_focus: StatusFocus::Explorer,
+                            ..
+                        })
+                    ) {
+                        self.focus_status_diff();
                     }
                     return;
                 }
@@ -345,6 +528,7 @@ impl App {
             Action::Global(action) => self.dispatch_global(action),
             Action::Preview(action) => self.dispatch_preview_action(action, source),
             Action::Show(action) => self.dispatch_show_action(action, source),
+            Action::Status(action) => self.dispatch_status_action(action, source),
         }
     }
 
@@ -352,6 +536,7 @@ impl App {
         match self.active_pane() {
             ActivePane::Preview => self.dispatch_preview_navigation(action),
             ActivePane::Show(focus) => self.dispatch_show_navigation(action, focus),
+            ActivePane::Status(focus) => self.dispatch_status_navigation(action, focus),
             ActivePane::Help => self.dispatch_help_navigation(action),
             ActivePane::Log => self.dispatch_log_navigation(action, source),
         }
@@ -397,6 +582,31 @@ impl App {
                 NavigationAction::MoveUp => self.move_show_diff(1, false),
                 NavigationAction::PageDown => self.move_show_diff(10, true),
                 NavigationAction::PageUp => self.move_show_diff(10, false),
+                NavigationAction::ScrollRight
+                | NavigationAction::ScrollLeft
+                | NavigationAction::ScrollStart
+                | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
+            },
+        }
+    }
+
+    fn dispatch_status_navigation(&mut self, action: NavigationAction, focus: StatusFocus) {
+        match focus {
+            StatusFocus::Explorer => match action {
+                NavigationAction::MoveDown => self.move_status_down(),
+                NavigationAction::MoveUp => self.move_status_up(),
+                NavigationAction::PageDown => self.page_status_down(),
+                NavigationAction::PageUp => self.page_status_up(),
+                NavigationAction::ScrollRight
+                | NavigationAction::ScrollLeft
+                | NavigationAction::ScrollStart
+                | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
+            },
+            StatusFocus::Diff => match action {
+                NavigationAction::MoveDown => self.move_status_diff(1, true),
+                NavigationAction::MoveUp => self.move_status_diff(1, false),
+                NavigationAction::PageDown => self.move_status_diff(10, true),
+                NavigationAction::PageUp => self.move_status_diff(10, false),
                 NavigationAction::ScrollRight
                 | NavigationAction::ScrollLeft
                 | NavigationAction::ScrollStart
@@ -472,6 +682,7 @@ impl App {
         match self.active_pane() {
             ActivePane::Preview => self.dispatch_preview_search(action),
             ActivePane::Show(focus) => self.dispatch_show_search(action, focus),
+            ActivePane::Status(focus) => self.dispatch_status_search(action, focus),
             ActivePane::Help | ActivePane::Log => self.dispatch_log_search(action, source),
         }
     }
@@ -498,6 +709,20 @@ impl App {
         }
     }
 
+    fn dispatch_status_search(&mut self, action: SearchAction, focus: StatusFocus) {
+        match (focus, action) {
+            (StatusFocus::Explorer, SearchAction::Start) => {
+                self.status = "Focus the status diff to search".into();
+            }
+            (StatusFocus::Explorer, SearchAction::Next | SearchAction::Previous) => {}
+            (StatusFocus::Diff, SearchAction::Start) => {
+                self.input = InputMode::Search(String::new());
+            }
+            (StatusFocus::Diff, SearchAction::Next) => self.repeat_status_search(true),
+            (StatusFocus::Diff, SearchAction::Previous) => self.repeat_status_search(false),
+        }
+    }
+
     fn dispatch_log_search(&mut self, action: SearchAction, source: &mut impl HistorySource) {
         match action {
             SearchAction::Start => {
@@ -514,7 +739,7 @@ impl App {
             GlobalAction::Command => {
                 if matches!(
                     self.active_pane(),
-                    ActivePane::Preview | ActivePane::Show(_)
+                    ActivePane::Preview | ActivePane::Show(_) | ActivePane::Status(_)
                 ) {
                     return;
                 }
@@ -523,7 +748,7 @@ impl App {
             GlobalAction::Help => {
                 if matches!(
                     self.active_pane(),
-                    ActivePane::Preview | ActivePane::Show(_)
+                    ActivePane::Preview | ActivePane::Show(_) | ActivePane::Status(_)
                 ) {
                     return;
                 }
@@ -542,6 +767,15 @@ impl App {
                 }
                 ActivePane::Show(ShowFocus::Diff) => {
                     self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
+                    self.input = InputMode::Normal;
+                }
+                ActivePane::Status(StatusFocus::Explorer) => {
+                    self.screen = Screen::Log;
+                    self.input = InputMode::Normal;
+                    self.status.clear();
+                }
+                ActivePane::Status(StatusFocus::Diff) => {
+                    self.screen.status_mut().unwrap().status_focus = StatusFocus::Explorer;
                     self.input = InputMode::Normal;
                 }
                 ActivePane::Help => {
@@ -568,6 +802,7 @@ impl App {
             Screen::Log => ActivePane::Log,
             Screen::Help(_) => ActivePane::Help,
             Screen::Show(show) => ActivePane::Show(show.show_focus),
+            Screen::Status(status) => ActivePane::Status(status.status_focus),
         }
     }
 
@@ -589,6 +824,22 @@ impl App {
         }
     }
 
+    fn dispatch_status_action(&mut self, action: StatusAction, source: &mut impl HistorySource) {
+        match action {
+            StatusAction::Open => {
+                if matches!(self.screen, Screen::Status(_)) {
+                    self.screen = Screen::Log;
+                    self.input = InputMode::Normal;
+                    self.status.clear();
+                } else {
+                    self.open_status(source);
+                }
+            }
+            StatusAction::SwitchGroup => self.switch_status_group(),
+            StatusAction::ToggleStage => self.toggle_status_stage(source),
+        }
+    }
+
     fn scroll_horizontal(&mut self, action: NavigationAction) {
         let maximum = self.max_horizontal_offset();
         let step = (self.horizontal_viewport_width / 2).max(1);
@@ -600,6 +851,13 @@ impl App {
                 Screen::Show(show) => match show.show_focus {
                     ShowFocus::Explorer => &mut show.show_explorer_horizontal_offset,
                     ShowFocus::Diff => &mut show.show_diff_horizontal_offset,
+                },
+                Screen::Status(status) => match status.status_focus {
+                    StatusFocus::Explorer => &mut status.explorer_horizontal_offset,
+                    StatusFocus::Diff => match status.active_group {
+                        StatusGroup::Staged => &mut status.staged_diff_horizontal_offset,
+                        StatusGroup::Unstaged => &mut status.unstaged_diff_horizontal_offset,
+                    },
                 },
                 Screen::Log => &mut self.log.log_horizontal_offset,
             }
@@ -640,6 +898,21 @@ impl App {
                 .iter()
                 .chain(show.show_files.iter().map(|file| &file.display))
                 .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
+                .max()
+                .unwrap_or(0),
+            Screen::Status(status) if status.status_focus == StatusFocus::Diff => status
+                .diff_lines()
+                .iter()
+                .map(|line| UnicodeWidthStr::width(crate::git::safe_text(line, false).as_str()))
+                .max()
+                .unwrap_or(0),
+            Screen::Status(status) => status
+                .staged()
+                .iter()
+                .chain(status.unstaged().iter())
+                .map(|file| {
+                    UnicodeWidthStr::width(crate::git::safe_text(&file.display, false).as_str())
+                })
                 .max()
                 .unwrap_or(0),
             Screen::Log => self
@@ -728,6 +1001,284 @@ impl App {
         }
     }
 
+    fn status_files(&self, group: StatusGroup) -> &[StatusFile] {
+        let status = self.screen.status().expect("status screen is active");
+        match group {
+            StatusGroup::Staged => status.staged(),
+            StatusGroup::Unstaged => status.unstaged(),
+        }
+    }
+
+    fn status_selected_file(&self) -> Option<StatusFile> {
+        let status = self.screen.status()?;
+        let files = self.status_files(status.active_group);
+        status
+            .selected()
+            .and_then(|index| files.get(index))
+            .cloned()
+    }
+
+    fn move_status_down(&mut self) {
+        let status = self.screen.status_mut().unwrap();
+        match status.active_group {
+            StatusGroup::Staged => {
+                if let Some(selected) = status.staged_selected {
+                    status.staged_selected =
+                        Some((selected + 1).min(status.staged.len().saturating_sub(1)));
+                    status.staged_explorer_offset = status.staged_selected.unwrap_or(0);
+                }
+            }
+            StatusGroup::Unstaged => {
+                if let Some(selected) = status.unstaged_selected {
+                    status.unstaged_selected =
+                        Some((selected + 1).min(status.unstaged.len().saturating_sub(1)));
+                    status.unstaged_explorer_offset = status.unstaged_selected.unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    fn move_status_up(&mut self) {
+        let status = self.screen.status_mut().unwrap();
+        match status.active_group {
+            StatusGroup::Staged => {
+                if let Some(selected) = status.staged_selected {
+                    status.staged_selected = Some(selected.saturating_sub(1));
+                    status.staged_explorer_offset = status.staged_selected.unwrap_or(0);
+                }
+            }
+            StatusGroup::Unstaged => {
+                if let Some(selected) = status.unstaged_selected {
+                    status.unstaged_selected = Some(selected.saturating_sub(1));
+                    status.unstaged_explorer_offset = status.unstaged_selected.unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    fn page_status_down(&mut self) {
+        let status = self.screen.status_mut().unwrap();
+        match status.active_group {
+            StatusGroup::Staged => {
+                if let Some(selected) = status.staged_selected {
+                    status.staged_selected =
+                        Some((selected + 10).min(status.staged.len().saturating_sub(1)));
+                    status.staged_explorer_offset = status.staged_selected.unwrap_or(0);
+                }
+            }
+            StatusGroup::Unstaged => {
+                if let Some(selected) = status.unstaged_selected {
+                    status.unstaged_selected =
+                        Some((selected + 10).min(status.unstaged.len().saturating_sub(1)));
+                    status.unstaged_explorer_offset = status.unstaged_selected.unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    fn page_status_up(&mut self) {
+        let status = self.screen.status_mut().unwrap();
+        match status.active_group {
+            StatusGroup::Staged => {
+                if let Some(selected) = status.staged_selected {
+                    status.staged_selected = Some(selected.saturating_sub(10));
+                    status.staged_explorer_offset = status.staged_selected.unwrap_or(0);
+                }
+            }
+            StatusGroup::Unstaged => {
+                if let Some(selected) = status.unstaged_selected {
+                    status.unstaged_selected = Some(selected.saturating_sub(10));
+                    status.unstaged_explorer_offset = status.unstaged_selected.unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    fn move_status_diff(&mut self, amount: usize, forward: bool) {
+        let status = self.screen.status_mut().unwrap();
+        let group = status.active_group;
+        let length = match group {
+            StatusGroup::Staged => status.staged_diff.len(),
+            StatusGroup::Unstaged => status.unstaged_diff.len(),
+        };
+        let current = match group {
+            StatusGroup::Staged => status.staged_diff_offset,
+            StatusGroup::Unstaged => status.unstaged_diff_offset,
+        };
+        let next = if forward {
+            (current + amount).min(length.saturating_sub(1))
+        } else {
+            current.saturating_sub(amount)
+        };
+        match group {
+            StatusGroup::Staged => status.staged_diff_offset = next,
+            StatusGroup::Unstaged => status.unstaged_diff_offset = next,
+        }
+        self.sync_status_selection_to_diff();
+    }
+
+    fn focus_status_diff(&mut self) {
+        let Some(file) = self.status_selected_file() else {
+            return;
+        };
+        let status = self.screen.status_mut().unwrap();
+        status.status_focus = StatusFocus::Diff;
+        status.staged_diff_horizontal_offset = 0;
+        status.unstaged_diff_horizontal_offset = 0;
+        let offset = status_patch_offset(status.diff_lines(), &file);
+        match offset {
+            Some(offset) => {
+                match status.active_group {
+                    StatusGroup::Staged => status.staged_diff_offset = offset,
+                    StatusGroup::Unstaged => status.unstaged_diff_offset = offset,
+                }
+                self.status.clear();
+            }
+            None => {
+                match status.active_group {
+                    StatusGroup::Staged => status.staged_diff_offset = 0,
+                    StatusGroup::Unstaged => status.unstaged_diff_offset = 0,
+                }
+                self.status = format!(
+                    "Patch location unavailable for {}",
+                    crate::git::safe_text(&file.display, false)
+                );
+            }
+        }
+    }
+
+    fn sync_status_selection_to_diff(&mut self) {
+        let status = self.screen.status_mut().unwrap();
+        let group = status.active_group;
+        let offset = status.diff_offset();
+        let selected = match group {
+            StatusGroup::Staged => {
+                status_file_at_patch_offset(&status.staged_diff, &status.staged, offset)
+            }
+            StatusGroup::Unstaged => {
+                status_file_at_patch_offset(&status.unstaged_diff, &status.unstaged, offset)
+            }
+        };
+        if let Some(selected) = selected {
+            match group {
+                StatusGroup::Staged => {
+                    status.staged_selected = Some(selected);
+                    status.staged_explorer_offset = selected;
+                }
+                StatusGroup::Unstaged => {
+                    status.unstaged_selected = Some(selected);
+                    status.unstaged_explorer_offset = selected;
+                }
+            }
+        }
+    }
+
+    fn switch_status_group(&mut self) {
+        if let ActivePane::Status(StatusFocus::Explorer) = self.active_pane() {
+            let status = self.screen.status_mut().unwrap();
+            status.active_group = match status.active_group {
+                StatusGroup::Staged => StatusGroup::Unstaged,
+                StatusGroup::Unstaged => StatusGroup::Staged,
+            };
+        }
+    }
+
+    fn open_status(&mut self, source: &mut impl HistorySource) {
+        match source.load_status() {
+            Ok(data) => {
+                self.screen = Screen::Status(StatusState::from_data(data));
+                self.input = InputMode::Normal;
+                self.status.clear();
+            }
+            Err(error) => self.status = format!("Could not load status: {error}"),
+        }
+    }
+
+    fn replace_status_data(&mut self, data: StatusData) {
+        let status = self.screen.status_mut().unwrap();
+        let staged_previous = status
+            .staged_selected
+            .and_then(|index| status.staged.get(index))
+            .cloned();
+        let unstaged_previous = status
+            .unstaged_selected
+            .and_then(|index| status.unstaged.get(index))
+            .cloned();
+        let staged_index = status.staged_selected;
+        let unstaged_index = status.unstaged_selected;
+
+        status.staged = data.staged;
+        status.unstaged = data.unstaged;
+        status.staged_diff = data.staged_diff;
+        status.unstaged_diff = data.unstaged_diff;
+        status.staged_selected =
+            refreshed_selection(&status.staged, staged_previous.as_ref(), staged_index);
+        status.unstaged_selected =
+            refreshed_selection(&status.unstaged, unstaged_previous.as_ref(), unstaged_index);
+        status.staged_explorer_offset = status
+            .staged_selected
+            .map_or(0, |index| index.min(status.staged_explorer_offset));
+        status.unstaged_explorer_offset = status
+            .unstaged_selected
+            .map_or(0, |index| index.min(status.unstaged_explorer_offset));
+        status.staged_diff_offset = 0;
+        status.unstaged_diff_offset = 0;
+        status.staged_diff_horizontal_offset = 0;
+        status.unstaged_diff_horizontal_offset = 0;
+    }
+
+    fn toggle_status_stage(&mut self, source: &mut impl HistorySource) {
+        let Some(status) = self.screen.status() else {
+            return;
+        };
+        let group = status.active_group;
+        let Some(previous_file) = self.status_selected_file() else {
+            return;
+        };
+        let data = match source.load_status() {
+            Ok(data) => data,
+            Err(error) => {
+                self.status = format!("Could not refresh status: {error}");
+                return;
+            }
+        };
+        self.replace_status_data(data);
+        let Some(refreshed_index) = self
+            .status_files(group)
+            .iter()
+            .position(|file| same_status_paths(file, &previous_file))
+        else {
+            self.status = "Selected status file changed during refresh".into();
+            return;
+        };
+        if let Some(status) = self.screen.status_mut() {
+            match group {
+                StatusGroup::Staged => status.staged_selected = Some(refreshed_index),
+                StatusGroup::Unstaged => status.unstaged_selected = Some(refreshed_index),
+            }
+        }
+        let file = self.status_files(group)[refreshed_index].clone();
+        if let Err(error) = source.toggle_stage(group == StatusGroup::Staged, &file) {
+            self.status = format!("Could not toggle stage: {error}");
+            return;
+        }
+        match source.load_status() {
+            Ok(data) => {
+                let focus_diff = self
+                    .screen
+                    .status()
+                    .is_some_and(|status| status.status_focus == StatusFocus::Diff);
+                self.replace_status_data(data);
+                if focus_diff {
+                    self.focus_status_diff();
+                } else {
+                    self.status.clear();
+                }
+            }
+            Err(error) => self.status = format!("Could not refresh status: {error}"),
+        }
+    }
+
     fn move_up(&mut self, source: &mut impl HistorySource) {
         let before = self.log.selected;
         self.log.selected = self.log.selected.saturating_sub(1);
@@ -767,6 +1318,13 @@ impl App {
             if show.show_focus == ShowFocus::Diff {
                 show.last_show_search = Some(query);
                 self.search_show_diff(forward, true);
+                return;
+            }
+        }
+        if let Screen::Status(status) = &mut self.screen {
+            if status.status_focus == StatusFocus::Diff {
+                status.last_search = Some(query);
+                self.search_status_diff(forward, true);
                 return;
             }
         }
@@ -1027,6 +1585,58 @@ impl App {
         }
     }
 
+    fn repeat_status_search(&mut self, forward: bool) {
+        self.search_status_diff(forward, false);
+    }
+
+    fn search_status_diff(&mut self, forward: bool, wrap: bool) {
+        let status = self.screen.status_mut().unwrap();
+        let Some(query) = status.last_search.clone() else {
+            self.status = "No previous search".into();
+            return;
+        };
+        let query_lower = query.to_lowercase();
+        let length = status.diff_lines().len();
+        if length == 0 {
+            self.status = format!("No match for `{query}`");
+            return;
+        }
+        let matches = |index: &usize| {
+            crate::git::safe_text(&status.diff_lines()[*index], false)
+                .to_lowercase()
+                .contains(&query_lower)
+        };
+        let offset = status.diff_offset();
+        let index = if forward {
+            let later = (offset + 1..length).find(&matches);
+            later.or_else(|| {
+                wrap.then(|| (0..=offset.min(length - 1)).find(&matches))
+                    .flatten()
+            })
+        } else {
+            let earlier = (0..offset).rev().find(&matches);
+            earlier.or_else(|| {
+                wrap.then(|| (offset..length).rev().find(&matches))
+                    .flatten()
+            })
+        };
+        if let Some(index) = index {
+            match status.active_group {
+                StatusGroup::Staged => status.staged_diff_offset = index,
+                StatusGroup::Unstaged => status.unstaged_diff_offset = index,
+            }
+            self.sync_status_selection_to_diff();
+            self.status = format!("Match for `{query}`");
+        } else {
+            let has_match = !wrap && (0..length).any(|index| matches(&index));
+            self.status = if has_match {
+                if forward { "(END)" } else { "(TOP)" }.into()
+            } else {
+                format!("No match for `{query}`")
+            };
+        }
+    }
+
     fn submit_command(&mut self, command: &str) {
         match command.trim() {
             "help" | "h" => {
@@ -1067,12 +1677,40 @@ impl App {
             .show()
             .and_then(|show| show.last_show_search.as_deref())
     }
+
+    pub fn status_search_query(&self) -> Option<&str> {
+        self.screen
+            .status()
+            .and_then(|status| status.last_search.as_deref())
+    }
 }
 
 fn matches_record(record: &CommitRecord, query: &str) -> bool {
     crate::git::safe_text(&record.display, false)
         .to_lowercase()
         .contains(query)
+}
+
+fn refreshed_selection(
+    files: &[StatusFile],
+    previous: Option<&StatusFile>,
+    previous_index: Option<usize>,
+) -> Option<usize> {
+    if files.is_empty() {
+        return None;
+    }
+    previous
+        .and_then(|file| {
+            files
+                .iter()
+                .position(|candidate| same_status_paths(candidate, file))
+        })
+        .or_else(|| previous_index.map(|index| index.min(files.len() - 1)))
+        .or(Some(0))
+}
+
+fn same_status_paths(left: &StatusFile, right: &StatusFile) -> bool {
+    left.old_path == right.old_path && left.new_path == right.new_path
 }
 
 #[cfg(test)]
@@ -2145,5 +2783,106 @@ mod tests {
         app.dispatch(Action::Show(ShowAction::Open), &mut empty_log);
         assert_eq!(app.screen, Screen::Log);
         assert_eq!(app.status, "Could not open show: No selected commit");
+    }
+
+    #[test]
+    fn failed_status_refresh_does_not_mutate_a_stale_selection() {
+        struct StatusRefreshFailure {
+            mutations: usize,
+        }
+
+        impl HistorySource for StatusRefreshFailure {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(records(1))
+            }
+
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                Err(GitError::Status {
+                    stage: "discovery".into(),
+                    reason: "planned refresh failure".into(),
+                })
+            }
+
+            fn toggle_stage(&mut self, _staged: bool, _file: &StatusFile) -> Result<(), GitError> {
+                self.mutations += 1;
+                Ok(())
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        let mut history = StatusRefreshFailure { mutations: 0 };
+        app.initialize(&mut history).unwrap();
+        app.dispatch(Action::Status(StatusAction::Open), &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert!(app.status.contains("planned refresh failure"));
+        app.screen = Screen::Status(StatusState::from_data(StatusData {
+            unstaged: vec![StatusFile {
+                display: " M stale.txt".into(),
+                old_path: Some(b"stale.txt".to_vec()),
+                new_path: Some(b"stale.txt".to_vec()),
+            }],
+            ..StatusData::default()
+        }));
+
+        app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
+
+        assert_eq!(history.mutations, 0);
+        assert!(app.status.contains("planned refresh failure"));
+        assert_eq!(app.screen.status().unwrap().selected(), Some(0));
+    }
+
+    #[test]
+    fn changed_status_selection_during_refresh_does_not_mutate_another_file() {
+        struct StatusSelectionChanged {
+            mutations: usize,
+        }
+
+        impl HistorySource for StatusSelectionChanged {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(records(1))
+            }
+
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                Ok(StatusData {
+                    unstaged: vec![StatusFile {
+                        display: " M replacement.txt".into(),
+                        old_path: Some(b"replacement.txt".to_vec()),
+                        new_path: Some(b"replacement.txt".to_vec()),
+                    }],
+                    ..StatusData::default()
+                })
+            }
+
+            fn toggle_stage(&mut self, _staged: bool, _file: &StatusFile) -> Result<(), GitError> {
+                self.mutations += 1;
+                Ok(())
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        let mut history = StatusSelectionChanged { mutations: 0 };
+        app.initialize(&mut history).unwrap();
+        app.screen = Screen::Status(StatusState::from_data(StatusData {
+            unstaged: vec![StatusFile {
+                display: " M selected.txt".into(),
+                old_path: Some(b"selected.txt".to_vec()),
+                new_path: Some(b"selected.txt".to_vec()),
+            }],
+            ..StatusData::default()
+        }));
+
+        app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
+
+        assert_eq!(history.mutations, 0);
+        assert_eq!(app.status, "Selected status file changed during refresh");
+        assert_eq!(app.screen.status().unwrap().selected(), Some(0));
     }
 }
