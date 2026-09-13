@@ -10,25 +10,25 @@
 
 | Key | Action |
 | --- | --- |
-| `j`, Down | Select next commit |
-| `k`, Up | Select previous commit |
-| Page Down, Page Up | Move ten rows |
-| Right, Left | Scroll the active log, preview, show, or help pane horizontally by half its width |
-| Home, End | Jump to the horizontal beginning or end of the active pane |
-| `/` | Enter a case-insensitive search and highlight all matches |
-| `n`, `N` | Repeat search until `(END)` or `(TOP)` without wraparound |
+| `j`, Down | Navigate down |
+| `k`, Up | Navigate up |
+| Page Down, Page Up | Move down or up ten rows |
+| Right, Left | Scroll horizontally |
+| Home, End | Jump to the start or end |
+| `/` | Search |
+| `n`, `N` | Next or previous match |
 | `:` | Enter a command |
-| `?` | Show help and the effective configuration |
-| Escape, `q` | Clear the active search, or back out of the focused pane; quit when the log has focus (Escape cancels text input) |
+| `?` | Show help |
+| Escape, `q` | Go back or quit |
 | Ctrl-C | Quit |
-| `p` | Toggle selected-commit preview |
-| `d` | Open selected-commit show mode |
-| `s` | Open or close working-tree status mode |
-| Tab | Switch between staged and unstaged status groups |
-| `u` | Stage the selected unstaged file or unstage the selected staged file |
-| Enter | Focus preview, show file, or status diff; Escape backs out one focus level |
+| `p` | Toggle preview |
+| `d` | Show selected commit |
+| `s` | Toggle status |
+| Tab | Switch status group |
+| `u` | Stage or unstage file |
+| Enter | Open selection |
 
-Commands are `:help`/`:h` and `:quit`/`:q`. An empty or unknown command is reported in the status line.
+Commands: `:help` (`:h`) and `:quit` (`:q`).
 
 ## Configuration
 
