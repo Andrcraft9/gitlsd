@@ -797,42 +797,72 @@ impl App {
                 self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
-            GlobalAction::Back => match self.active_pane() {
-                ActivePane::Preview => {
-                    self.log.preview_focused = false;
-                    self.input = InputMode::Normal;
-                }
-                ActivePane::Show(ShowFocus::Explorer) => {
-                    self.screen = Screen::Log;
-                    self.input = InputMode::Normal;
+            GlobalAction::Back => {
+                if self.clear_active_search() {
                     self.status.clear();
+                    return;
                 }
-                ActivePane::Show(ShowFocus::Diff) => {
-                    self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
-                    self.input = InputMode::Normal;
+                match self.active_pane() {
+                    ActivePane::Preview => {
+                        self.log.preview_focused = false;
+                        self.input = InputMode::Normal;
+                    }
+                    ActivePane::Show(ShowFocus::Explorer) => {
+                        self.screen = Screen::Log;
+                        self.input = InputMode::Normal;
+                        self.status.clear();
+                    }
+                    ActivePane::Show(ShowFocus::Diff) => {
+                        self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
+                        self.input = InputMode::Normal;
+                    }
+                    ActivePane::Status(StatusFocus::Explorer) => {
+                        self.screen = Screen::Log;
+                        self.input = InputMode::Normal;
+                        self.status.clear();
+                    }
+                    ActivePane::Status(StatusFocus::Diff) => {
+                        self.screen.status_mut().unwrap().status_focus = StatusFocus::Explorer;
+                        self.input = InputMode::Normal;
+                    }
+                    ActivePane::Help => {
+                        self.screen = Screen::Log;
+                        self.input = InputMode::Normal;
+                    }
+                    ActivePane::Log => {
+                        self.running = false;
+                        self.status = "Quit requested".into();
+                    }
                 }
-                ActivePane::Status(StatusFocus::Explorer) => {
-                    self.screen = Screen::Log;
-                    self.input = InputMode::Normal;
-                    self.status.clear();
-                }
-                ActivePane::Status(StatusFocus::Diff) => {
-                    self.screen.status_mut().unwrap().status_focus = StatusFocus::Explorer;
-                    self.input = InputMode::Normal;
-                }
-                ActivePane::Help => {
-                    self.screen = Screen::Log;
-                    self.input = InputMode::Normal;
-                }
-                ActivePane::Log => {
-                    self.running = false;
-                    self.status = "Quit requested".into();
-                }
-            },
+            }
             GlobalAction::Quit => {
                 self.running = false;
                 self.status = "Quit requested".into();
             }
+        }
+    }
+
+    fn clear_active_search(&mut self) -> bool {
+        match self.active_pane() {
+            ActivePane::Log => self.log.last_search.take().is_some(),
+            ActivePane::Preview => self.log.last_preview_search.take().is_some(),
+            ActivePane::Show(ShowFocus::Diff) => self
+                .screen
+                .show_mut()
+                .unwrap()
+                .last_show_search
+                .take()
+                .is_some(),
+            ActivePane::Status(StatusFocus::Diff) => self
+                .screen
+                .status_mut()
+                .unwrap()
+                .last_search
+                .take()
+                .is_some(),
+            ActivePane::Help
+            | ActivePane::Show(ShowFocus::Explorer)
+            | ActivePane::Status(StatusFocus::Explorer) => false,
         }
     }
 
@@ -2303,6 +2333,7 @@ mod tests {
         }
         assert_eq!(app.log.preview_offset, 1);
         app.dispatch(Action::Global(GlobalAction::Back), &mut history);
+        app.dispatch(Action::Global(GlobalAction::Back), &mut history);
         app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
         assert!(!app.log.preview_focused);
         assert_eq!(app.log.selected, 1);
@@ -2585,6 +2616,95 @@ mod tests {
     }
 
     #[test]
+    fn back_clears_the_active_search_before_navigating() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+
+        app.log.last_search = Some("log".into());
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.log_search_query(), None);
+        assert!(app.running);
+
+        app.handle_key(Key::Enter, &mut history);
+        app.log.last_preview_search = Some("preview".into());
+        app.handle_key(Key::Char('q'), &mut history);
+        assert_eq!(app.preview_search_query(), None);
+        assert!(app.log.preview_focused);
+        app.handle_key(Key::Char('q'), &mut history);
+
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.screen.show_mut().unwrap().last_show_search = Some("show".into());
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.show_search_query(), None);
+        assert_eq!(app.screen.show().unwrap().show_focus, ShowFocus::Diff);
+
+        app.handle_key(Key::Escape, &mut history);
+        app.handle_key(Key::Escape, &mut history);
+        app.screen = Screen::Status(StatusState {
+            status_focus: StatusFocus::Diff,
+            last_search: Some("status".into()),
+            ..StatusState::default()
+        });
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.status_search_query(), None);
+        assert_eq!(app.screen.status().unwrap().status_focus, StatusFocus::Diff);
+    }
+
+    #[test]
+    fn escape_cancels_search_input_without_clearing_a_submitted_search() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(1),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.log.last_search = Some("saved".into());
+
+        app.handle_key(Key::Char('/'), &mut history);
+        app.handle_key(Key::Char('n'), &mut history);
+        app.handle_key(Key::Escape, &mut history);
+
+        assert_eq!(app.input_label(), None);
+        assert_eq!(app.log_search_query(), Some("saved"));
+    }
+
+    #[test]
+    fn back_ignores_searches_in_inactive_panes() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.log.last_search = Some("log".into());
+
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Escape, &mut history);
+        assert!(!app.log.preview_focused);
+        assert_eq!(app.log_search_query(), Some("log"));
+
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.log_search_query(), Some("log"));
+
+        app.dispatch(Action::Global(GlobalAction::Help), &mut history);
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.log_search_query(), Some("log"));
+
+        app.screen = Screen::Status(StatusState::default());
+        app.handle_key(Key::Escape, &mut history);
+        assert_eq!(app.screen, Screen::Log);
+        assert_eq!(app.log_search_query(), Some("log"));
+    }
+
+    #[test]
     fn scrolling_show_diff_keeps_explorer_selection_on_current_file() {
         let mut app = App::new(Config::default());
         let mut history = ShowHistory {
@@ -2780,6 +2900,7 @@ mod tests {
         assert_eq!(app.screen.show().unwrap().show_diff_offset, 3);
         app.dispatch(Action::Search(SearchAction::Previous), &mut history);
         assert_eq!(app.status, "(TOP)");
+        app.handle_key(Key::Escape, &mut history);
         app.handle_key(Key::Escape, &mut history);
         app.handle_key(Key::Escape, &mut history);
         app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);

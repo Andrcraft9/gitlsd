@@ -19,7 +19,7 @@
 | `n`, `N` | Repeat search until `(END)` or `(TOP)` without wraparound |
 | `:` | Enter a command |
 | `?` | Show help and the effective configuration |
-| Escape, `q` | Back out of the focused pane; quit when the log has focus (Escape cancels text input) |
+| Escape, `q` | Clear the active search, or back out of the focused pane; quit when the log has focus (Escape cancels text input) |
 | Ctrl-C | Quit |
 | `p` | Toggle selected-commit preview |
 | `d` | Open selected-commit show mode |
