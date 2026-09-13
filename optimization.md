@@ -201,6 +201,7 @@ should be covered while large-document rendering changes.
 ## Recommended changes
 
 ### Priority 0: make loaded-diff navigation proportional to the viewport
+Status: Done, 1ff6176c4ef5b04e360c59c977f0b9a39145a407
 
 #### A. Build a patch index once
 
