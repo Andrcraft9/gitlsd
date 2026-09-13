@@ -3,12 +3,15 @@
 //! [`HistorySource`] is the application-facing contract. [`GitHistory`]
 //! implements it by executing configured Git commands directly, pairing
 //! Git-rendered rows with stable commit IDs, loading cohesive show and status
-//! data, performing whole-file status mutations, and sanitizing terminal output.
+//! data, performing whole-file status mutations, filtering diff presentation through
+//! an optional direct subprocess, and sanitizing terminal output after filtering.
 
 use std::ffi::OsString;
 use std::fmt;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
@@ -96,6 +99,7 @@ pub struct GitHistory {
     show_commit_command: Vec<String>,
     show_command: Vec<String>,
     status_diff_command: Vec<String>,
+    diff_filter: Option<Vec<String>>,
 }
 
 impl GitHistory {
@@ -106,6 +110,7 @@ impl GitHistory {
         show_commit_command: Vec<String>,
         show_command: Vec<String>,
         status_diff_command: Vec<String>,
+        diff_filter: Option<Vec<String>>,
     ) -> Self {
         Self {
             directory: directory.into(),
@@ -114,7 +119,114 @@ impl GitHistory {
             show_commit_command,
             show_command,
             status_diff_command,
+            diff_filter,
         }
+    }
+
+    /// Write stdin while independent readers drain both output pipes.
+    /// Always join the writer and reap the child, including on I/O failures.
+    fn presentation(&self, input: Vec<u8>, operation: &str) -> Result<Vec<String>, GitError> {
+        let output = if input.is_empty() {
+            input
+        } else if let Some(command) = &self.diff_filter {
+            let Some((executable, arguments)) = command.split_first() else {
+                return Err(GitError::Filter {
+                    operation: operation.into(),
+                    command: String::new(),
+                    reason: "filter command is empty".into(),
+                });
+            };
+            let failure = |reason: String| GitError::Filter {
+                operation: operation.into(),
+                command: safe_text(executable, false),
+                reason: safe_text(&reason, false),
+            };
+            let mut child = Command::new(executable)
+                .args(arguments)
+                .current_dir(&self.directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| failure(format!("could not launch: {error}")))?;
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            let writer = thread::Builder::new().spawn(move || stdin.write_all(&input));
+            let writer = match writer {
+                Ok(writer) => writer,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(failure(format!("could not start stdin writer: {error}")));
+                }
+            };
+            let mut stdout = child.stdout.take().expect("piped stdout");
+            let mut stderr = child.stderr.take().expect("piped stderr");
+            let collected = thread::scope(|scope| {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let mut read_error = None;
+                for (is_stdout, pipe) in [
+                    (true, &mut stdout as &mut (dyn Read + Send)),
+                    (false, &mut stderr as &mut (dyn Read + Send)),
+                ] {
+                    let sender = sender.clone();
+                    let reader = thread::Builder::new().spawn_scoped(scope, move || {
+                        let mut bytes = Vec::new();
+                        let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+                        let _ = sender.send((is_stdout, result));
+                    });
+                    if let Err(error) = reader {
+                        let _ = child.kill();
+                        read_error = Some(error);
+                        break;
+                    }
+                }
+                drop(sender);
+                let mut output = Vec::new();
+                let mut errors = Vec::new();
+                for (is_stdout, result) in receiver {
+                    match result {
+                        Ok(bytes) if is_stdout => output = bytes,
+                        Ok(bytes) => errors = bytes,
+                        Err(error) => {
+                            let _ = child.kill();
+                            read_error = Some(error);
+                        }
+                    }
+                }
+                (output, errors, read_error)
+            });
+            let status = child.wait();
+            let written = writer.join();
+            let (output, stderr, read_error) = collected;
+            let status =
+                status.map_err(|error| failure(format!("could not reap filter: {error}")))?;
+            if let Some(error) = read_error {
+                return Err(failure(format!("could not collect output: {error}")));
+            }
+            if !status.success() {
+                return Err(failure(format!(
+                    "exit {}: {}",
+                    status
+                        .code()
+                        .map_or_else(|| "signal".into(), |code| code.to_string()),
+                    if stderr.is_empty() {
+                        "no error output".into()
+                    } else {
+                        String::from_utf8_lossy(&stderr).trim().to_owned()
+                    }
+                )));
+            }
+            written
+                .map_err(|_| failure("stdin writer panicked".into()))?
+                .map_err(|error| failure(format!("could not write stdin: {error}")))?;
+            output
+        } else {
+            input
+        };
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .map(|line| safe_text(line, true))
+            .collect())
     }
 
     fn run(&self, arguments: &[String]) -> Result<Vec<u8>, GitError> {
@@ -271,11 +383,7 @@ impl GitHistory {
         arguments
     }
 
-    fn load_untracked_diffs(
-        &self,
-        root: &Path,
-        files: &[StatusFile],
-    ) -> Result<Vec<String>, GitError> {
+    fn load_untracked_diffs(&self, root: &Path, files: &[StatusFile]) -> Result<Vec<u8>, GitError> {
         let mut lines = Vec::new();
         for file in files.iter().filter(|file| file.is_untracked()) {
             let Some(path) = file.new_path.as_deref() else {
@@ -283,11 +391,7 @@ impl GitHistory {
             };
             let arguments = self.untracked_diff_arguments(path);
             let output = self.run_status_command(root, &arguments, "untracked diff", true)?;
-            lines.extend(
-                String::from_utf8_lossy(&output)
-                    .lines()
-                    .map(|line| safe_text(line, true)),
-            );
+            lines.extend(output);
         }
         Ok(lines)
     }
@@ -355,10 +459,7 @@ impl HistorySource for GitHistory {
 
     fn load_preview(&mut self, id: &str) -> Result<Vec<String>, GitError> {
         let arguments = command_with_commit(&self.preview_command, id);
-        Ok(String::from_utf8_lossy(&self.run(&arguments)?)
-            .lines()
-            .map(|line| safe_text(line, true))
-            .collect())
+        self.presentation(self.run(&arguments)?, "preview")
     }
 
     fn load_show(&mut self, id: &str) -> Result<ShowData, GitError> {
@@ -381,12 +482,10 @@ impl HistorySource for GitHistory {
             ],
         )?)?;
 
-        let diff = String::from_utf8_lossy(
-            &self.run_show("diff", &command_with_commit(&self.show_command, id))?,
-        )
-        .lines()
-        .map(|line| safe_text(line, true))
-        .collect();
+        let diff = self.presentation(
+            self.run_show("diff", &command_with_commit(&self.show_command, id))?,
+            "show diff",
+        )?;
 
         Ok(ShowData {
             metadata,
@@ -410,25 +509,23 @@ impl HistorySource for GitHistory {
             false,
         )?;
         let (staged, unstaged) = parse_status(&output)?;
-        let staged_diff = String::from_utf8_lossy(&self.run_status_command(
-            &root,
-            &self.status_diff_arguments(true),
+        let staged_diff = self.presentation(
+            self.run_status_command(
+                &root,
+                &self.status_diff_arguments(true),
+                "staged diff",
+                false,
+            )?,
             "staged diff",
-            false,
-        )?)
-        .lines()
-        .map(|line| safe_text(line, true))
-        .collect();
-        let mut unstaged_diff = String::from_utf8_lossy(&self.run_status_command(
+        )?;
+        let mut unstaged_bytes = self.run_status_command(
             &root,
             &self.status_diff_arguments(false),
             "unstaged diff",
             false,
-        )?)
-        .lines()
-        .map(|line| safe_text(line, true))
-        .collect::<Vec<_>>();
-        unstaged_diff.extend(self.load_untracked_diffs(&root, &unstaged)?);
+        )?;
+        unstaged_bytes.extend(self.load_untracked_diffs(&root, &unstaged)?);
+        let unstaged_diff = self.presentation(unstaged_bytes, "unstaged diff")?;
         Ok(StatusData {
             staged,
             unstaged,
@@ -629,31 +726,53 @@ fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
         .collect()
 }
 
-/// Return the first `diff --git` line that belongs to `file`.
+/// Return the first Git or delta file header that belongs to `file`.
 pub fn patch_offset(lines: &[String], file: &ChangedFile) -> Option<usize> {
     lines.iter().enumerate().find_map(|(index, line)| {
         let line = safe_text(line, false);
-        let rest = line.strip_prefix("diff --git ")?;
-        diff_header_paths(rest)
-            .into_iter()
-            .find_map(|(old_path, new_path)| {
-                let matches_old = file
-                    .old_path
-                    .as_deref()
-                    .is_some_and(|path| diff_header_matches_path(&old_path, path));
-                let matches_new = file
-                    .new_path
-                    .as_deref()
-                    .is_some_and(|path| diff_header_matches_path(&new_path, path));
-                let matches = match (file.old_path.as_deref(), file.new_path.as_deref()) {
-                    (Some(_), Some(_)) => matches_old && matches_new,
-                    (Some(_), None) => matches_old,
-                    (None, Some(_)) => matches_new,
-                    (None, None) => false,
-                };
-                matches.then_some(index)
-            })
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            return diff_header_paths(rest)
+                .into_iter()
+                .find_map(|(old_path, new_path)| {
+                    let matches_old = file
+                        .old_path
+                        .as_deref()
+                        .is_some_and(|path| diff_header_matches_path(&old_path, path));
+                    let matches_new = file
+                        .new_path
+                        .as_deref()
+                        .is_some_and(|path| diff_header_matches_path(&new_path, path));
+                    let matches = match (file.old_path.as_deref(), file.new_path.as_deref()) {
+                        (Some(_), Some(_)) => matches_old && matches_new,
+                        (Some(_), None) => matches_old,
+                        (None, Some(_)) => matches_new,
+                        (None, None) => false,
+                    };
+                    matches.then_some(index)
+                });
+        }
+        let next_is_delta_rule = lines.get(index + 1).is_some_and(|next| {
+            let next = safe_text(next, false);
+            !next.is_empty() && next.chars().all(|character| character == '─')
+        });
+        (next_is_delta_rule && delta_header_matches_file(&line, file)).then_some(index)
     })
+}
+
+fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
+    match (file.old_path.as_deref(), file.new_path.as_deref()) {
+        (Some(old), Some(new)) if old != new => {
+            header.strip_prefix("renamed: ").is_some_and(|paths| {
+                paths
+                    .split_once('⟶')
+                    .is_some_and(|(left, right)| left.trim() == old && right.trim() == new)
+            })
+        }
+        (None, Some(new)) => header == format!("added: {new}"),
+        (Some(old), None) => header == format!("removed: {old}"),
+        (Some(old), Some(new)) => old == new && header == new,
+        (None, None) => false,
+    }
 }
 
 pub fn status_patch_offset(lines: &[String], file: &StatusFile) -> Option<usize> {
@@ -870,30 +989,43 @@ fn pair_records(display: &[u8], ids: &[u8]) -> Result<Vec<CommitRecord>, GitErro
         .collect())
 }
 
-/// SGR has no cursor, clipboard, title, or other terminal side effects.
+/// Retain SGR colors and remove other terminal control sequences.
 pub fn safe_text(input: &str, retain_sgr: bool) -> String {
     let mut output = String::new();
     let mut chars = input.chars().peekable();
     while let Some(character) = chars.next() {
         if character == '\x1b' && chars.peek() == Some(&'[') {
             chars.next();
-            let mut parameters = String::new();
-            while chars
-                .peek()
-                .is_some_and(|c| c.is_ascii_digit() || *c == ';')
-            {
-                parameters.push(chars.next().unwrap());
-            }
-            if chars.peek() == Some(&'m') {
-                chars.next();
-                if retain_sgr {
-                    output.push_str(&format!("\x1b[{parameters}m"));
+            let mut sequence = String::new();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    if next == 'm'
+                        && sequence
+                            .chars()
+                            .all(|value| value.is_ascii_digit() || matches!(value, ';' | ':'))
+                        && retain_sgr
+                    {
+                        output.push_str("\x1b[");
+                        output.push_str(&sequence);
+                        output.push('m');
+                    }
+                    break;
                 }
-            } else {
-                output.push('�');
-                output.push('[');
-                output.push_str(&parameters);
+                sequence.push(next);
             }
+        } else if character == '\x1b' && chars.peek() == Some(&']') {
+            chars.next();
+            while let Some(next) = chars.next() {
+                if next == '\x07' {
+                    break;
+                }
+                if next == '\x1b' && chars.peek() == Some(&'\\') {
+                    chars.next();
+                    break;
+                }
+            }
+        } else if character == '\x1b' {
+            chars.next();
         } else if character.is_control() {
             output.push('�');
         } else {
@@ -905,11 +1037,28 @@ pub fn safe_text(input: &str, retain_sgr: bool) -> String {
 
 #[derive(Clone, Debug)]
 pub enum GitError {
-    Launch { directory: PathBuf, reason: String },
-    Process { status: Option<i32>, stderr: String },
+    Launch {
+        directory: PathBuf,
+        reason: String,
+    },
+    Process {
+        status: Option<i32>,
+        stderr: String,
+    },
     Output(String),
-    Show { stage: String, reason: String },
-    Status { stage: String, reason: String },
+    Show {
+        stage: String,
+        reason: String,
+    },
+    Status {
+        stage: String,
+        reason: String,
+    },
+    Filter {
+        operation: String,
+        command: String,
+        reason: String,
+    },
     Unborn,
 }
 
@@ -936,6 +1085,14 @@ impl fmt::Display for GitError {
             Self::Status { stage, reason } => {
                 write!(formatter, "Git status {stage} failed: {reason}")
             }
+            Self::Filter {
+                operation,
+                command,
+                reason,
+            } => write!(
+                formatter,
+                "diff filter `{command}` for {operation} failed: {reason}"
+            ),
             Self::Unborn => write!(formatter, "repository has no commits yet"),
         }
     }
@@ -952,6 +1109,128 @@ pub fn current_directory() -> Result<PathBuf, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    fn filter_history(script: &str) -> GitHistory {
+        GitHistory::new(
+            ".",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(vec!["sh".into(), "-c".into(), script.into()]),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_handles_large_bidirectional_output_without_deadlock() {
+        let history = filter_history("head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; cat");
+        let lines = history.presentation(vec![b'x'; 524288], "preview").unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with(&"x".repeat(524288)));
+        assert_eq!(lines[0].chars().count(), 262144 + 524288);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_preserves_sgr_and_sanitizes_controls_after_processing() {
+        let history = filter_history(r"cat; printf '\033[31mred\033[m\033[2J\007'");
+        let lines = history
+            .presentation(b"original\n".to_vec(), "show diff")
+            .unwrap();
+        assert_eq!(lines, ["original", "\x1b[31mred\x1b[m�"]);
+        assert_eq!(safe_text(&lines[1], false), "red�");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_skips_empty_input_and_prioritizes_exit_diagnostics() {
+        let history = filter_history(r"printf '\033[31mfailed\033[m\007' >&2; exit 7");
+        assert!(
+            history
+                .presentation(Vec::new(), "staged diff")
+                .unwrap()
+                .is_empty()
+        );
+        let error = history
+            .presentation(vec![b'x'; 524288], "unstaged diff")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("diff filter `sh` for unstaged diff failed: exit 7: failed�"),
+            "{error}"
+        );
+        assert!(!error.contains('\x1b'));
+        let history = filter_history("exec 0<&-; sleep 0.05");
+        assert!(
+            history
+                .presentation(vec![b'x'; 524288], "preview")
+                .unwrap_err()
+                .to_string()
+                .contains("could not write stdin")
+        );
+    }
+
+    #[test]
+    fn missing_filter_reports_executable_and_operation() {
+        let mut history = GitHistory::new(
+            ".",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(vec!["gitlsd-missing-filter-executable".into()]),
+        );
+        let error = history
+            .presentation(b"patch".to_vec(), "preview")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gitlsd-missing-filter-executable"));
+        assert!(error.contains("preview"));
+        assert!(error.contains("could not launch"));
+        history.diff_filter = None;
+        assert_eq!(
+            history
+                .presentation(b"patch\n".to_vec(), "preview")
+                .unwrap(),
+            ["patch"]
+        );
+    }
+
+    #[test]
+    fn empty_filter_command_is_reported_without_panicking() {
+        let history = GitHistory::new(
+            ".",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(Vec::new()),
+        );
+        assert!(
+            history
+                .presentation(b"patch".to_vec(), "preview")
+                .unwrap_err()
+                .to_string()
+                .contains("filter command is empty")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_receives_raw_bytes_before_sanitization() {
+        let history = filter_history("od -An -tx1 | tr -d ' \\n'");
+        assert_eq!(
+            history
+                .presentation(vec![0xff, 0x1b, 0x07], "preview")
+                .unwrap(),
+            ["ff1b07"]
+        );
+    }
+
     #[test]
     fn pairs_git_text_without_rebuilding_it() {
         let id = "a".repeat(40);
@@ -964,8 +1243,8 @@ mod tests {
     fn only_sgr_survives_and_plain_text_is_stable() {
         let input = "\x1b[31mred\x1b[m\x1b[2J\x1b]52;clipboard\x07\t";
         let safe = safe_text(input, true);
-        assert_eq!(safe, "\x1b[31mred\x1b[m�[2J�]52;clipboard��");
-        assert_eq!(safe_text(&safe, false), "red�[2J�]52;clipboard��");
+        assert_eq!(safe, "\x1b[31mred\x1b[m�");
+        assert_eq!(safe_text(&safe, false), "red�");
     }
 
     #[test]
@@ -1041,6 +1320,28 @@ mod tests {
         let files = parse_changed_files(b"M\tpath.txt\n").unwrap();
         let diff = vec!["diff --git old/path.txt new/path.txt".into()];
         assert_eq!(patch_offset(&diff, &files[0]), Some(0));
+    }
+
+    #[test]
+    fn patch_offsets_match_standard_delta_file_headers() {
+        let files = parse_changed_files(
+            b"M\tmodified.txt\nA\tadded.txt\nD\tdeleted.txt\nR100\told name.txt\tnew name.txt\n",
+        )
+        .unwrap();
+        let diff = vec![
+            "modified.txt".into(),
+            "────".into(),
+            "added: added.txt".into(),
+            "────".into(),
+            "removed: deleted.txt".into(),
+            "────".into(),
+            "renamed: old name.txt ⟶   new name.txt".into(),
+            "────".into(),
+        ];
+        assert_eq!(patch_offset(&diff, &files[0]), Some(0));
+        assert_eq!(patch_offset(&diff, &files[1]), Some(2));
+        assert_eq!(patch_offset(&diff, &files[2]), Some(4));
+        assert_eq!(patch_offset(&diff, &files[3]), Some(6));
     }
 
     #[test]
@@ -1127,6 +1428,7 @@ mod tests {
                 "--".into(),
                 "*.rs".into(),
             ],
+            None,
         );
         assert_eq!(
             history.status_diff_arguments(true),
@@ -1153,6 +1455,7 @@ mod tests {
                 "--".into(),
                 "*.rs".into(),
             ],
+            None,
         );
         assert_eq!(
             history.untracked_diff_arguments(b"literal[*].txt"),

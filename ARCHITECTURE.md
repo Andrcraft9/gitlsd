@@ -28,7 +28,7 @@ flowchart TD
 - `cli` defines startup arguments.
 - `config` resolves runtime policy and input mappings; configured action names are represented by six domain groups: `NavigationAction`, `SearchAction`, `GlobalAction`, `PreviewAction`, `ShowAction`, and `StatusAction`.
 - `app` owns application state and behavior. It coordinates user actions and screen transitions independently of terminal rendering and Git process details.
-- `git` provides repository data through the Git CLI.
+- `git` provides repository data through the Git CLI. It runs the optional shared `diff-filter` subprocess on raw diff presentation bytes before terminal sanitization, collecting output while supplying stdin. Discovery, metadata, file identity, and mutations bypass this filter.
 - `ui` is the interactive terminal frontend. It renders show and status modes across the full content area and reuses the content-area aspect-ratio split rule used by the log/preview screen.
 - `debug` is the deterministic scripted frontend used by integration tests; it exposes show and status focus, group, selection, offsets, metadata, file rows, and diff content in stable plain text.
 

@@ -33,6 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.show_commit_command.clone(),
         config.show_command.clone(),
         config.status_diff_command.clone(),
+        config.diff_filter.clone(),
     );
     let mut app = App::new(config);
     app.initialize(&mut source)?;

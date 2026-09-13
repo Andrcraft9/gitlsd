@@ -328,10 +328,11 @@ mod tests {
         app.initialize(&mut history).unwrap();
         assert_eq!(
             crate::git::safe_text(&app.log_state().preview_lines()[0], true),
-            "\x1b[31mred\x1b[m�[2J"
+            "\x1b[31mred\x1b[m"
         );
         let output = snapshot(&app);
-        assert!(output.contains("red�[2J"));
+        assert!(output.contains("red"));
+        assert!(!output.contains("�[2J"));
         assert!(!output.contains('\x1b'));
     }
 

@@ -43,6 +43,7 @@ set preview = git show --stat --patch
 set show-commit = git show --no-patch
 set show = git show --patch --format=
 set status-diff = git diff --color=always
+set diff-filter = delta --paging never
 bind j move-down
 bind x quit
 bind semicolon command
@@ -52,9 +53,12 @@ bind semicolon command
 - `batch-size` sets pagination and must be greater than zero.
 - `preview`, `show-commit`, and `show` customize commit views.
 - `status-diff` customizes status diff presentation. Status discovery and staging commands remain fixed.
+- `diff-filter` optionally filters the full preview, show diff, and staged/unstaged diffs, including untracked files. It is disabled by default; `set diff-filter =` disables it explicitly.
 - `bind` maps a character or named key to an action. Enter and Backspace are reserved for text input.
 
-Git commands run directly without a shell or external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
+The example filter requires `delta` on PATH; delta is only needed when configured. Filters receive Git bytes on stdin and supply displayed text on stdout, using the same argument quoting as other commands. A launch failure or unsuccessful exit reports an error for the affected view without fallback. Empty diffs skip the filter. Safe ANSI colors are preserved; other terminal escape sequences are removed, and debug output remains plain text. File jumps recognize Git patch headers and delta's standard file headers. Other custom filters must preserve `diff --git` headers for file jumps and selection synchronization. `--paging never` disables delta's pager.
+
+Git and filter commands run directly without a shell. Git runs without an external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
 
 ## Deterministic debug interface
 

@@ -253,6 +253,7 @@ pub struct Config {
     pub show_commit_command: Vec<String>,
     pub show_command: Vec<String>,
     pub status_diff_command: Vec<String>,
+    pub diff_filter: Option<Vec<String>>,
     pub batch_size: usize,
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
@@ -326,6 +327,7 @@ impl Default for Config {
                 "--color=always".into(),
             ],
             status_diff_command: vec!["git".into(), "diff".into(), "--color=always".into()],
+            diff_filter: None,
             batch_size: 100,
             bindings,
             source: None,
@@ -454,6 +456,17 @@ impl Config {
                 validate_show(values, "show", location)?;
                 self.show_command = values.to_vec();
             }
+            "diff-filter" => {
+                if values.first().is_some_and(|value| value.is_empty())
+                    || values.iter().any(|value| value.contains('\0'))
+                {
+                    return Err(ConfigError::new(
+                        location,
+                        "diff-filter requires a nonempty executable and arguments without NUL bytes",
+                    ));
+                }
+                self.diff_filter = (!values.is_empty()).then(|| values.to_vec());
+            }
             "status-diff" => {
                 validate_status_diff(values, location)?;
                 self.status_diff_command = values.to_vec();
@@ -507,6 +520,16 @@ impl Config {
                     .join(" ")
             ),
             format!("setting.batch-size={}", self.batch_size),
+            format!(
+                "setting.diff-filter={}",
+                self.diff_filter
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             format!(
                 "setting.preview={}",
                 self.preview_command
@@ -763,6 +786,52 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_diff_filter_parses_disables_and_round_trips() {
+        let path = Path::new("filter.conf");
+        assert!(Config::default().diff_filter.is_none());
+        assert!(
+            Config::default()
+                .help_lines()
+                .contains(&"setting.diff-filter=".into())
+        );
+        let config = Config::parse(
+            r##"set diff-filter = "custom filter" "quoted argument" "" "#literal""##,
+            path,
+        )
+        .unwrap();
+        let arguments = config.diff_filter.as_ref().unwrap();
+        assert_eq!(
+            arguments,
+            &["custom filter", "quoted argument", "", "#literal"]
+        );
+        let help = config
+            .help_lines()
+            .into_iter()
+            .find(|line| line.starts_with("setting.diff-filter="))
+            .unwrap();
+        let value = help.strip_prefix("setting.diff-filter=").unwrap();
+        assert_eq!(
+            Config::parse(&format!("set diff-filter = {value}"), path)
+                .unwrap()
+                .diff_filter,
+            config.diff_filter
+        );
+        assert!(
+            Config::parse("set diff-filter = cat\nset diff-filter =", path)
+                .unwrap()
+                .diff_filter
+                .is_none()
+        );
+        for malformed in [
+            "set diff-filter = ''",
+            "set diff-filter = 'unterminated",
+            "set diff-filter = cat \0",
+        ] {
+            let error = Config::parse(malformed, path).unwrap_err().to_string();
+            assert!(error.starts_with("filter.conf:1:"), "{error}");
+        }
+    }
     use super::*;
 
     #[test]

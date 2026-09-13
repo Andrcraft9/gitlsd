@@ -7,7 +7,7 @@
 ## Planned: features
 
 - [x] Preview split view
-- [ ] Preview filter config to support delta
+- [x] Shared diff filter configuration for preview, show, and status (delta support)
 - [ ] Multi-line log entries: navigate entries not lines
 - [x] Show mode: file explorer, diff per file
 - [x] Status mode (staged/unstaged changes)

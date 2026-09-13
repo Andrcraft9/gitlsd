@@ -12,6 +12,159 @@ use std::os::unix::ffi::OsStringExt;
 
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(unix)]
+fn presentation_filter() -> &'static str {
+    // Keep headers intact while coloring all lines and transforming content.
+    "set diff-filter = sed 's/^/\x1b[31m/; s/$/\x1b[m/; s/changed/FILTERED/; s/worktree/FILTERED/; /txt/!s/untracked/FILTERED/; /txt/!s/staged/FILTERED/; s/variants/FILTERED-METADATA/'\n"
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_filter_transforms_all_views_and_preserves_navigation_and_search() {
+    let show = show_fixture();
+    let config = presentation_filter();
+    let preview = stdout(run_in(&show, "", config));
+    assert!(preview.contains("+FILTERED"), "{preview}");
+    assert!(!preview.contains('\x1b'));
+    for script in [
+        "d;down;enter",
+        "d;enter;page-down;page-down",
+        "d;enter;right",
+        "d;enter;end",
+    ] {
+        let filtered = stdout(run_in(&show, script, config));
+        let plain = stdout(run_in(&show, script, ""));
+        for prefix in [
+            "show.selected=",
+            "show.diff.offset=",
+            "show.focus=",
+            "show.diff.horizontal-offset=",
+        ] {
+            assert_eq!(
+                filtered.lines().find(|line| line.starts_with(prefix)),
+                plain.lines().find(|line| line.starts_with(prefix)),
+                "{script}: {prefix}"
+            );
+        }
+        assert!(!filtered.contains("Patch location unavailable"));
+        assert!(!filtered.contains('\x1b'));
+    }
+    let searched = stdout(run_in(&show, "d;enter;/;F;I;L;T;E;R;E;D;enter", config));
+    assert!(searched.contains("status=Match for `FILTERED`"));
+    assert!(searched.contains("    variants"));
+    assert!(!searched.contains("    FILTERED-METADATA")); // Metadata bypasses the filter.
+
+    let status = status_fixture();
+    for script in [
+        "s;enter",
+        "s;down;enter",
+        "s;tab;down;enter",
+        "s;enter;page-down",
+    ] {
+        let filtered = stdout(run_in(&status, script, config));
+        let plain = stdout(run_in(&status, script, ""));
+        assert!(filtered.contains("+FILTERED"), "{script}: {filtered}");
+        for prefix in ["status.selected=", "status.diff.offset=", "status.group="] {
+            assert_eq!(
+                filtered.lines().find(|line| line.starts_with(prefix)),
+                plain.lines().find(|line| line.starts_with(prefix)),
+                "{script}: {prefix}"
+            );
+        }
+        assert!(!filtered.contains("Patch location unavailable"));
+        assert!(!filtered.contains('\x1b'));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn filtered_status_refreshes_after_staging_and_unstaging_untracked_file() {
+    let directory = status_fixture();
+    let config = presentation_filter();
+    let staged = stdout(run_in(&directory, "s;down;u;tab;end", config));
+    assert!(
+        git_output(&directory, &["diff", "--cached", "--name-only"])
+            .windows(b"untracked file.txt".len())
+            .any(|name| name == b"untracked file.txt")
+    );
+    assert!(staged.contains("+FILTERED"), "{staged}");
+    let unstaged = stdout(run_in(&directory, "s;tab;down;down;down;u", config));
+    assert!(unstaged.contains("?? untracked file.txt"), "{unstaged}");
+    assert!(unstaged.contains("+FILTERED"));
+    assert_eq!(
+        fs::read(directory.join("untracked file.txt")).unwrap(),
+        b"untracked\n"
+    );
+    assert!(
+        !git_output(&directory, &["diff", "--cached", "--name-only"])
+            .windows(b"untracked file.txt".len())
+            .any(|name| name == b"untracked file.txt")
+    );
+}
+
+#[test]
+fn missing_diff_filter_errors_identify_every_affected_view() {
+    let directory = status_fixture();
+    let config = "set diff-filter = gitlsd-missing-filter-executable\n";
+    for (script, operation) in [("", "preview"), ("d", "show diff"), ("s", "staged diff")] {
+        let output = stdout(run_in(&directory, script, config));
+        assert!(output.contains(&format!("diff filter `gitlsd-missing-filter-executable` for {operation} failed: could not launch")), "{output}");
+    }
+    let unstaged_directory = show_fixture();
+    fs::write(unstaged_directory.join("space name.txt"), "unstaged\n").unwrap();
+    let unstaged = stdout(run_in(&unstaged_directory, "s", config));
+    assert!(
+        unstaged.contains("for unstaged diff failed: could not launch"),
+        "{unstaged}"
+    );
+    let disabled = stdout(run_in(
+        &directory,
+        "s",
+        &format!("{config}set diff-filter =\n"),
+    ));
+    assert!(disabled.contains("screen=status"));
+}
+
+#[cfg(unix)]
+#[test]
+fn structural_filter_changes_report_missing_patch_and_empty_diffs_stay_empty() {
+    let directory = show_fixture();
+    let filtered = stdout(run_in(
+        &directory,
+        "d;enter",
+        "set diff-filter = sed 's/diff --git/patch/'\n",
+    ));
+    assert!(filtered.contains("Patch location unavailable"));
+    git(&directory, &["commit", "--allow-empty", "-qm", "empty"]);
+    let empty = stdout(run_in(
+        &directory,
+        "d",
+        "set diff-filter = printf DECORATION\n",
+    ));
+    assert!(!empty.contains("DECORATION"));
+    let clean = stdout(run_in(
+        &directory,
+        "s",
+        "set diff-filter = printf DECORATION\n",
+    ));
+    assert!(!clean.contains("DECORATION"));
+}
+
+#[cfg(unix)]
+#[test]
+fn header_preserving_filter_may_insert_lines_without_breaking_file_jumps() {
+    let show = show_fixture();
+    let config = "set diff-filter = sed '/^diff --git/i inserted-by-filter'\n";
+    let jumped = stdout(run_in(&show, "d;down;enter", config));
+    assert!(jumped.contains("show.selected=1\n"), "{jumped}");
+    assert!(!jumped.contains("Patch location unavailable"));
+
+    let status = status_fixture();
+    let jumped = stdout(run_in(&status, "s;down;enter", config));
+    assert!(jumped.contains("status.selected=1\n"), "{jumped}");
+    assert!(!jumped.contains("Patch location unavailable"));
+}
+
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mapbox-gl-js")
 }
