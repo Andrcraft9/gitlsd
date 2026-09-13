@@ -26,7 +26,7 @@ flowchart TD
 
 - `main` composes the application and selects a frontend.
 - `cli` defines startup arguments.
-- `config` resolves runtime policy and input mappings; configured action names are represented by six domain groups: `NavigationAction`, `SearchAction`, `GlobalAction`, `PreviewAction`, `ShowAction`, and `StatusAction`.
+- `config` resolves, creates, and parses runtime policy and input mappings; configured action names are represented by six domain groups: `NavigationAction`, `SearchAction`, `GlobalAction`, `PreviewAction`, `ShowAction`, and `StatusAction`.
 - `app` owns application state and behavior. It coordinates user actions and screen transitions independently of terminal rendering and Git process details, retaining per-document patch indexes and revisions for loaded diffs.
 - `git` provides repository data through the Git CLI. It runs the optional shared `diff-filter` subprocess on raw diff presentation bytes before terminal sanitization, collecting output while supplying stdin. It indexes recognized Git and delta patch headers independently of rendering; discovery, metadata, file identity, and mutations bypass this filter.
 - `ui` is the interactive terminal frontend. It renders show and status modes across the full content area, reuses the content-area aspect-ratio split rule used by the log/preview screen, and caches styled terminal-visible document rows by application revision and search query.

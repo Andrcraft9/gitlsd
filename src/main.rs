@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use gitlsd::app::App;
 use gitlsd::cli::Cli;
-use gitlsd::config::Config;
+use gitlsd::config::{Config, CreateDefaultConfig};
 use gitlsd::git::{GitHistory, current_directory};
 
 fn main() -> ExitCode {
@@ -24,6 +24,17 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if cli.create_config {
+        match Config::create_default()? {
+            CreateDefaultConfig::Created(path) => {
+                println!("Created configuration at {}", path.display());
+            }
+            CreateDefaultConfig::Exists(path) => {
+                println!("Configuration already exists at {}", path.display());
+            }
+        }
+        return Ok(());
+    }
     let config = Config::load(cli.config.as_deref())?;
     let directory = current_directory()?;
     let mut source = GitHistory::new(

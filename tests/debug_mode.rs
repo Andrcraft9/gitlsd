@@ -616,6 +616,51 @@ fn discovers_default_config_from_home() {
 }
 
 #[test]
+fn creates_default_config_once() {
+    let index = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let home = std::env::temp_dir().join(format!(
+        "gitlsd-create-config-{}-{index}",
+        std::process::id()
+    ));
+    let path = home.join(".config/gitlsd/config");
+
+    let created = command()
+        .arg("--create-config")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(created.stdout).unwrap(),
+        format!("Created configuration at {}\n", path.display())
+    );
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("set batch-size = 100\n"));
+    assert!(contents.contains("bind j = move-down\n"));
+    assert!(contents.contains("bind ctrl-c = quit\n"));
+
+    let exists = command()
+        .arg("--create-config")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        exists.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exists.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(exists.stdout).unwrap(),
+        format!("Configuration already exists at {}\n", path.display())
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), contents);
+}
+
+#[test]
 fn invalid_script_key_and_config_return_actionable_errors() {
     let invalid_key = run_preview("not-a-key", "");
     assert!(!invalid_key.status.success());

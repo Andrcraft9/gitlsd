@@ -33,6 +33,9 @@ Commands: `:help` (`:h`) and `:quit` (`:q`).
 ## Configuration
 
 gitlsd reads `$HOME/.config/gitlsd/config` when it exists. Use `--config PATH` to select another file.
+Use `--create-config` to write a configuration containing every default setting and
+binding at the default location. If that file already exists, gitlsd leaves it
+unchanged.
 
 Configuration is line-oriented. Whitespace separates arguments, quotes preserve whitespace, backslash escapes a character, and `#` starts a comment. `=` is optional.
 

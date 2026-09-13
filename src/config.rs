@@ -1,6 +1,6 @@
 //! Runtime policy and frontend-independent input vocabulary.
 //!
-//! This module owns defaults, configuration discovery and parsing, effective
+//! This module owns defaults, configuration discovery, creation and parsing, effective
 //! settings, and the mapping from physical [`Key`] values to domain-grouped
 //! application [`Action`] values. The grouped runtime vocabulary retains the
 //! same user-facing action names for configuration and effective help.
@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -341,6 +343,12 @@ pub struct ConfigError {
     reason: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum CreateDefaultConfig {
+    Created(PathBuf),
+    Exists(PathBuf),
+}
+
 impl ConfigError {
     fn new(location: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
@@ -359,6 +367,37 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    pub fn create_default() -> Result<CreateDefaultConfig, ConfigError> {
+        let path = default_path().ok_or_else(|| {
+            ConfigError::new(
+                "configuration",
+                "cannot determine default path because HOME is not set",
+            )
+        })?;
+        let directory = path
+            .parent()
+            .expect("default configuration path has a parent");
+        fs::create_dir_all(directory).map_err(|error| {
+            ConfigError::new(directory.display().to_string(), error.to_string())
+        })?;
+
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(CreateDefaultConfig::Exists(path));
+            }
+            Err(error) => {
+                return Err(ConfigError::new(
+                    path.display().to_string(),
+                    error.to_string(),
+                ));
+            }
+        };
+        file.write_all(Self::default().file_contents().as_bytes())
+            .map_err(|error| ConfigError::new(path.display().to_string(), error.to_string()))?;
+        Ok(CreateDefaultConfig::Created(path))
+    }
+
     pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
         let path = match explicit {
             Some(path) => Some(path.to_path_buf()),
@@ -576,6 +615,33 @@ impl Config {
         );
         lines
     }
+
+    fn file_contents(&self) -> String {
+        let mut lines = vec![
+            format!("set log = {}", format_arguments(&self.log_command)),
+            format!("set batch-size = {}", self.batch_size),
+            format!("set preview = {}", format_arguments(&self.preview_command)),
+            format!(
+                "set show-commit = {}",
+                format_arguments(&self.show_commit_command)
+            ),
+            format!("set show = {}", format_arguments(&self.show_command)),
+            format!(
+                "set status-diff = {}",
+                format_arguments(&self.status_diff_command)
+            ),
+            format!(
+                "set diff-filter = {}",
+                format_arguments(self.diff_filter.as_deref().unwrap_or_default())
+            ),
+        ];
+        lines.extend(
+            self.bindings
+                .iter()
+                .map(|(key, action)| format!("bind {} = {}", key.display(), action.name())),
+        );
+        format!("{}\n", lines.join("\n"))
+    }
 }
 
 fn validate_show(arguments: &[String], setting: &str, location: &str) -> Result<(), ConfigError> {
@@ -728,6 +794,14 @@ fn quote_argument(argument: &str) -> String {
     )
 }
 
+fn format_arguments(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|argument| quote_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn tokenize(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -786,6 +860,21 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_config_file_round_trips() {
+        let default = Config::default();
+        let parsed = Config::parse(&default.file_contents(), Path::new("default.conf")).unwrap();
+
+        assert_eq!(parsed.log_command, default.log_command);
+        assert_eq!(parsed.preview_command, default.preview_command);
+        assert_eq!(parsed.show_commit_command, default.show_commit_command);
+        assert_eq!(parsed.show_command, default.show_command);
+        assert_eq!(parsed.status_diff_command, default.status_diff_command);
+        assert_eq!(parsed.diff_filter, default.diff_filter);
+        assert_eq!(parsed.batch_size, default.batch_size);
+        assert_eq!(parsed.bindings, default.bindings);
+    }
+
     #[test]
     fn optional_diff_filter_parses_disables_and_round_trips() {
         let path = Path::new("filter.conf");

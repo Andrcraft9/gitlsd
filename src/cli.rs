@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
+    /// Create a default configuration file at the default location.
+    #[arg(long, conflicts_with = "config")]
+    pub create_config: bool,
+
     /// Run semicolon-separated scripted keys and print the final state.
     #[cfg(debug_assertions)]
     #[arg(long, value_name = "KEYS")]
