@@ -5,7 +5,10 @@
 //! Git-rendered rows with stable commit IDs, loading cohesive show and status
 //! data, performing whole-file status mutations, filtering diff presentation through
 //! an optional direct subprocess, and sanitizing terminal output after filtering.
+//! It also indexes recognized Git and delta patch headers independently of terminal
+//! rendering so application navigation does not rescan loaded documents.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{Read, Write};
@@ -70,6 +73,157 @@ pub struct StatusData {
     pub unstaged: Vec<StatusFile>,
     pub staged_diff: Vec<String>,
     pub unstaged_diff: Vec<String>,
+}
+
+/// Patch-header locations for one loaded diff document.
+///
+/// Direct file lookup retains the first matching header. Reverse lookup is sorted
+/// by source position and selects the latest header at or before an offset.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PatchIndex {
+    file_to_line: Vec<Option<usize>>,
+    patch_starts: Vec<(usize, usize)>,
+}
+
+impl PatchIndex {
+    pub fn for_changed_files(lines: &[String], files: &[ChangedFile]) -> Self {
+        Self::build(lines, files)
+    }
+
+    pub fn for_status_files(lines: &[String], files: &[StatusFile]) -> Self {
+        let files = files
+            .iter()
+            .map(|file| ChangedFile {
+                display: file.display.clone(),
+                old_path: file.old_path.as_deref().map(display_raw_path),
+                new_path: file.new_path.as_deref().map(display_raw_path),
+            })
+            .collect::<Vec<_>>();
+        Self::build(lines, &files)
+    }
+
+    pub fn offset_for(&self, file_index: usize) -> Option<usize> {
+        self.file_to_line.get(file_index).copied().flatten()
+    }
+
+    pub fn file_at(&self, offset: usize) -> Option<usize> {
+        let end = self
+            .patch_starts
+            .partition_point(|(start, _)| *start <= offset);
+        end.checked_sub(1)
+            .and_then(|index| self.patch_starts.get(index))
+            .map(|(_, file_index)| *file_index)
+    }
+
+    fn build(lines: &[String], files: &[ChangedFile]) -> Self {
+        let mut file_lookup = HashMap::<String, Vec<usize>>::new();
+        for (file_index, file) in files.iter().enumerate() {
+            for path in file.old_path.iter().chain(file.new_path.iter()) {
+                file_lookup
+                    .entry(path.clone())
+                    .or_default()
+                    .push(file_index);
+            }
+        }
+        let plain = lines
+            .iter()
+            .map(|line| safe_text(line, false))
+            .collect::<Vec<_>>();
+        let mut index = Self {
+            file_to_line: vec![None; files.len()],
+            patch_starts: Vec::new(),
+        };
+        for (line_index, line) in plain.iter().enumerate() {
+            let file_indices = if let Some(rest) = line.strip_prefix("diff --git ") {
+                diff_header_paths(rest)
+                    .into_iter()
+                    .flat_map(|(old_path, new_path)| {
+                        matching_file_indices(
+                            files,
+                            &file_lookup,
+                            &[&old_path, &new_path],
+                            |file| diff_header_matches_file(file, &old_path, &new_path),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let next_is_delta_rule = plain.get(line_index + 1).is_some_and(|next| {
+                    !next.is_empty() && next.chars().all(|character| character == '─')
+                });
+                if next_is_delta_rule {
+                    matching_file_indices(files, &file_lookup, &delta_header_paths(line), |file| {
+                        delta_header_matches_file(line, file)
+                    })
+                } else {
+                    Vec::new()
+                }
+            };
+            let mut file_indices = file_indices;
+            file_indices.sort_unstable();
+            file_indices.dedup();
+            for file_index in file_indices {
+                index.file_to_line[file_index].get_or_insert(line_index);
+                index.patch_starts.push((line_index, file_index));
+            }
+        }
+        index.patch_starts.sort_by_key(|(start, _)| *start);
+        index
+    }
+}
+
+fn matching_file_indices(
+    files: &[ChangedFile],
+    file_lookup: &HashMap<String, Vec<usize>>,
+    header_paths: &[&str],
+    matches: impl Fn(&ChangedFile) -> bool,
+) -> Vec<usize> {
+    let mut candidates = HashSet::new();
+    for path in header_paths {
+        for variant in path_variants(path) {
+            if let Some(indices) = file_lookup.get(variant) {
+                candidates.extend(indices);
+            }
+        }
+    }
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    if candidates.is_empty() {
+        candidates.extend(0..files.len());
+    }
+    candidates
+        .into_iter()
+        .filter(|index| matches(&files[*index]))
+        .collect()
+}
+
+fn path_variants(path: &str) -> impl Iterator<Item = &str> {
+    let stripped = path
+        .strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path);
+    std::iter::once(path).chain(
+        std::iter::once(stripped).chain(
+            stripped
+                .char_indices()
+                .filter(|(_, character)| *character == '/')
+                .map(|(index, _)| &stripped[index + 1..]),
+        ),
+    )
+}
+
+fn delta_header_paths(header: &str) -> Vec<&str> {
+    if let Some(paths) = header.strip_prefix("renamed: ") {
+        return paths
+            .split_once('⟶')
+            .map(|(old, new)| vec![old.trim(), new.trim()])
+            .unwrap_or_default();
+    }
+    if let Some(path) = header.strip_prefix("added: ") {
+        return vec![path];
+    }
+    if let Some(path) = header.strip_prefix("removed: ") {
+        return vec![path];
+    }
+    vec![header]
 }
 
 pub trait HistorySource {
@@ -728,35 +882,24 @@ fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
 
 /// Return the first Git or delta file header that belongs to `file`.
 pub fn patch_offset(lines: &[String], file: &ChangedFile) -> Option<usize> {
-    lines.iter().enumerate().find_map(|(index, line)| {
-        let line = safe_text(line, false);
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            return diff_header_paths(rest)
-                .into_iter()
-                .find_map(|(old_path, new_path)| {
-                    let matches_old = file
-                        .old_path
-                        .as_deref()
-                        .is_some_and(|path| diff_header_matches_path(&old_path, path));
-                    let matches_new = file
-                        .new_path
-                        .as_deref()
-                        .is_some_and(|path| diff_header_matches_path(&new_path, path));
-                    let matches = match (file.old_path.as_deref(), file.new_path.as_deref()) {
-                        (Some(_), Some(_)) => matches_old && matches_new,
-                        (Some(_), None) => matches_old,
-                        (None, Some(_)) => matches_new,
-                        (None, None) => false,
-                    };
-                    matches.then_some(index)
-                });
-        }
-        let next_is_delta_rule = lines.get(index + 1).is_some_and(|next| {
-            let next = safe_text(next, false);
-            !next.is_empty() && next.chars().all(|character| character == '─')
-        });
-        (next_is_delta_rule && delta_header_matches_file(&line, file)).then_some(index)
-    })
+    PatchIndex::for_changed_files(lines, std::slice::from_ref(file)).offset_for(0)
+}
+
+fn diff_header_matches_file(file: &ChangedFile, old_path: &str, new_path: &str) -> bool {
+    let matches_old = file
+        .old_path
+        .as_deref()
+        .is_some_and(|path| diff_header_matches_path(old_path, path));
+    let matches_new = file
+        .new_path
+        .as_deref()
+        .is_some_and(|path| diff_header_matches_path(new_path, path));
+    match (file.old_path.as_deref(), file.new_path.as_deref()) {
+        (Some(_), Some(_)) => matches_old && matches_new,
+        (Some(_), None) => matches_old,
+        (None, Some(_)) => matches_new,
+        (None, None) => false,
+    }
 }
 
 fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
@@ -776,12 +919,7 @@ fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
 }
 
 pub fn status_patch_offset(lines: &[String], file: &StatusFile) -> Option<usize> {
-    let changed = ChangedFile {
-        display: file.display.clone(),
-        old_path: file.old_path.as_deref().map(display_raw_path),
-        new_path: file.new_path.as_deref().map(display_raw_path),
-    };
-    patch_offset(lines, &changed)
+    PatchIndex::for_status_files(lines, std::slice::from_ref(file)).offset_for(0)
 }
 
 pub fn status_file_at_patch_offset(
@@ -789,13 +927,7 @@ pub fn status_file_at_patch_offset(
     files: &[StatusFile],
     offset: usize,
 ) -> Option<usize> {
-    files
-        .iter()
-        .enumerate()
-        .filter_map(|(index, file)| status_patch_offset(lines, file).map(|start| (start, index)))
-        .filter(|(start, _)| *start <= offset)
-        .max_by_key(|(start, _)| *start)
-        .map(|(_, index)| index)
+    PatchIndex::for_status_files(lines, files).file_at(offset)
 }
 
 /// Return the changed-file row whose patch contains `offset`.
@@ -804,13 +936,7 @@ pub fn file_at_patch_offset(
     files: &[ChangedFile],
     offset: usize,
 ) -> Option<usize> {
-    files
-        .iter()
-        .enumerate()
-        .filter_map(|(index, file)| patch_offset(lines, file).map(|start| (start, index)))
-        .filter(|(start, _)| *start <= offset)
-        .max_by_key(|(start, _)| *start)
-        .map(|(_, index)| index)
+    PatchIndex::for_changed_files(lines, files).file_at(offset)
 }
 
 fn diff_header_paths(input: &str) -> Vec<(String, String)> {
@@ -1342,6 +1468,21 @@ mod tests {
         assert_eq!(patch_offset(&diff, &files[1]), Some(2));
         assert_eq!(patch_offset(&diff, &files[2]), Some(4));
         assert_eq!(patch_offset(&diff, &files[3]), Some(6));
+        let index = PatchIndex::for_changed_files(&diff, &files);
+        assert_eq!(index.file_at(1), Some(0));
+        assert_eq!(index.file_at(3), Some(1));
+        assert_eq!(index.file_at(5), Some(2));
+        assert_eq!(index.file_at(7), Some(3));
+    }
+
+    #[test]
+    fn patch_index_keeps_suffix_compatible_file_rows_in_source_order() {
+        let files = parse_changed_files(b"M\tfoo\nM\tz/foo\n").unwrap();
+        let diff = vec!["diff --git a/z/foo b/z/foo".into()];
+        let index = PatchIndex::for_changed_files(&diff, &files);
+        assert_eq!(index.offset_for(0), Some(0));
+        assert_eq!(index.offset_for(1), Some(0));
+        assert_eq!(index.file_at(0), Some(1));
     }
 
     #[test]
@@ -1359,6 +1500,22 @@ mod tests {
         assert_eq!(file_at_patch_offset(&diff, &files, 3), Some(1));
         assert_eq!(file_at_patch_offset(&diff, &files, 4), Some(1));
         assert_eq!(file_at_patch_offset(&["metadata".into()], &files, 0), None);
+    }
+
+    #[test]
+    fn patch_index_keeps_first_direct_match_and_binary_reverse_lookup() {
+        let files = parse_changed_files(b"M\tone.rs\nM\ttwo.rs\n").unwrap();
+        let mut diff = vec!["diff --git a/one.rs b/one.rs".into()];
+        diff.extend((0..70_000).map(|index| format!("one line {index}")));
+        diff.push("diff --git a/two.rs b/two.rs".into());
+        diff.push("diff --git a/one.rs b/one.rs".into());
+
+        let index = PatchIndex::for_changed_files(&diff, &files);
+        assert_eq!(index.offset_for(0), Some(0));
+        assert_eq!(index.offset_for(1), Some(70_001));
+        assert_eq!(index.file_at(70_000), Some(0));
+        assert_eq!(index.file_at(70_001), Some(1));
+        assert_eq!(index.file_at(70_002), Some(0));
     }
 
     #[test]

@@ -1,17 +1,18 @@
 //! Application state machine and behavior.
 //!
 //! [`App`] owns persistent log state plus enum-scoped help, show, and status state,
-//! input modes, commands, and shutdown intent.
+//! input modes, commands, shutdown intent, and loaded-diff indexes/revisions that
+//! remain independent of terminal rendering.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::{
     Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, SearchAction, ShowAction,
     StatusAction,
 };
 use crate::git::{
-    ChangedFile, CommitRecord, GitError, HistorySource, StatusData, StatusFile,
-    file_at_patch_offset, patch_offset, status_file_at_patch_offset, status_patch_offset,
+    ChangedFile, CommitRecord, GitError, HistorySource, PatchIndex, StatusData, StatusFile,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -117,6 +118,7 @@ pub struct LogState {
     next_offset: usize,
     last_search: Option<String>,
     last_preview_search: Option<String>,
+    preview_revision: u64,
 }
 
 /// Scroll state that exists only while help is active.
@@ -133,6 +135,8 @@ pub struct ShowState {
     show_metadata: Vec<String>,
     show_files: Vec<ChangedFile>,
     show_diff_lines: Vec<String>,
+    show_patch_index: PatchIndex,
+    show_diff_revision: u64,
     show_selected: Option<usize>,
     show_explorer_offset: usize,
     show_explorer_horizontal_offset: usize,
@@ -150,6 +154,10 @@ pub struct StatusState {
     unstaged: Vec<StatusFile>,
     staged_diff: Vec<String>,
     unstaged_diff: Vec<String>,
+    staged_patch_index: PatchIndex,
+    unstaged_patch_index: PatchIndex,
+    staged_diff_revision: u64,
+    unstaged_diff_revision: u64,
     staged_selected: Option<usize>,
     unstaged_selected: Option<usize>,
     staged_explorer_offset: usize,
@@ -162,6 +170,11 @@ pub struct StatusState {
     last_search: Option<String>,
 }
 
+fn next_document_revision() -> u64 {
+    static NEXT_DOCUMENT_REVISION: AtomicU64 = AtomicU64::new(1);
+    NEXT_DOCUMENT_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Default for ShowState {
     fn default() -> Self {
         Self {
@@ -169,6 +182,8 @@ impl Default for ShowState {
             show_metadata: Vec::new(),
             show_files: Vec::new(),
             show_diff_lines: Vec::new(),
+            show_patch_index: PatchIndex::default(),
+            show_diff_revision: next_document_revision(),
             show_selected: None,
             show_explorer_offset: 0,
             show_explorer_horizontal_offset: 0,
@@ -188,6 +203,10 @@ impl Default for StatusState {
             unstaged: Vec::new(),
             staged_diff: Vec::new(),
             unstaged_diff: Vec::new(),
+            staged_patch_index: PatchIndex::default(),
+            unstaged_patch_index: PatchIndex::default(),
+            staged_diff_revision: next_document_revision(),
+            unstaged_diff_revision: next_document_revision(),
             staged_selected: None,
             unstaged_selected: None,
             staged_explorer_offset: 0,
@@ -233,6 +252,10 @@ impl LogState {
 
     pub fn preview_horizontal_offset(&self) -> usize {
         self.preview_horizontal_offset
+    }
+
+    pub fn preview_revision(&self) -> u64 {
+        self.preview_revision
     }
 }
 
@@ -282,17 +305,28 @@ impl ShowState {
     pub fn diff_horizontal_offset(&self) -> usize {
         self.show_diff_horizontal_offset
     }
+
+    pub fn diff_revision(&self) -> u64 {
+        self.show_diff_revision
+    }
 }
 
 impl StatusState {
     fn from_data(data: StatusData) -> Self {
         let staged_selected = (!data.staged.is_empty()).then_some(0);
         let unstaged_selected = (!data.unstaged.is_empty()).then_some(0);
+        let staged_patch_index = PatchIndex::for_status_files(&data.staged_diff, &data.staged);
+        let unstaged_patch_index =
+            PatchIndex::for_status_files(&data.unstaged_diff, &data.unstaged);
         Self {
             staged: data.staged,
             unstaged: data.unstaged,
             staged_diff: data.staged_diff,
             unstaged_diff: data.unstaged_diff,
+            staged_patch_index,
+            unstaged_patch_index,
+            staged_diff_revision: next_document_revision(),
+            unstaged_diff_revision: next_document_revision(),
             staged_selected,
             unstaged_selected,
             ..Self::default()
@@ -371,6 +405,13 @@ impl StatusState {
         }
     }
 
+    pub fn diff_revision(&self) -> u64 {
+        match self.active_group {
+            StatusGroup::Staged => self.staged_diff_revision,
+            StatusGroup::Unstaged => self.unstaged_diff_revision,
+        }
+    }
+
     pub fn diff_lines(&self) -> &[String] {
         match self.active_group {
             StatusGroup::Staged => &self.staged_diff,
@@ -406,6 +447,7 @@ impl App {
                 next_offset: 0,
                 last_search: None,
                 last_preview_search: None,
+                preview_revision: next_document_revision(),
             },
             screen: Screen::Log,
             input: InputMode::Normal,
@@ -1125,7 +1167,11 @@ impl App {
         status.status_focus = StatusFocus::Diff;
         status.staged_diff_horizontal_offset = 0;
         status.unstaged_diff_horizontal_offset = 0;
-        let offset = status_patch_offset(status.diff_lines(), &file);
+        let selected = status.selected();
+        let offset = selected.and_then(|selected| match status.active_group {
+            StatusGroup::Staged => status.staged_patch_index.offset_for(selected),
+            StatusGroup::Unstaged => status.unstaged_patch_index.offset_for(selected),
+        });
         match offset {
             Some(offset) => {
                 match status.active_group {
@@ -1152,12 +1198,8 @@ impl App {
         let group = status.active_group;
         let offset = status.diff_offset();
         let selected = match group {
-            StatusGroup::Staged => {
-                status_file_at_patch_offset(&status.staged_diff, &status.staged, offset)
-            }
-            StatusGroup::Unstaged => {
-                status_file_at_patch_offset(&status.unstaged_diff, &status.unstaged, offset)
-            }
+            StatusGroup::Staged => status.staged_patch_index.file_at(offset),
+            StatusGroup::Unstaged => status.unstaged_patch_index.file_at(offset),
         };
         if let Some(selected) = selected {
             match group {
@@ -1211,6 +1253,12 @@ impl App {
         status.unstaged = data.unstaged;
         status.staged_diff = data.staged_diff;
         status.unstaged_diff = data.unstaged_diff;
+        status.staged_patch_index =
+            PatchIndex::for_status_files(&status.staged_diff, &status.staged);
+        status.unstaged_patch_index =
+            PatchIndex::for_status_files(&status.unstaged_diff, &status.unstaged);
+        status.staged_diff_revision = next_document_revision();
+        status.unstaged_diff_revision = next_document_revision();
         status.staged_selected =
             refreshed_selection(&status.staged, staged_previous.as_ref(), staged_index);
         status.unstaged_selected =
@@ -1408,6 +1456,7 @@ impl App {
         self.log.preview_offset = 0;
         self.log.preview_horizontal_offset = 0;
         self.log.preview_lines.clear();
+        self.log.preview_revision = next_document_revision();
         let Some(id) = self.selected_record().map(|record| record.id.clone()) else {
             return;
         };
@@ -1475,11 +1524,14 @@ impl App {
 
         match source.load_show(&id) {
             Ok(data) => {
+                let patch_index = PatchIndex::for_changed_files(&data.diff, &data.files);
                 self.screen = Screen::Show(ShowState {
                     show_metadata: data.metadata,
                     show_selected: (!data.files.is_empty()).then_some(0),
                     show_files: data.files,
                     show_diff_lines: data.diff,
+                    show_patch_index: patch_index,
+                    show_diff_revision: next_document_revision(),
                     ..ShowState::default()
                 });
                 self.input = InputMode::Normal;
@@ -1503,7 +1555,7 @@ impl App {
         };
         show.show_focus = ShowFocus::Diff;
         show.show_diff_horizontal_offset = 0;
-        let status = if let Some(offset) = patch_offset(&show.show_diff_lines, file) {
+        let status = if let Some(offset) = show.show_patch_index.offset_for(selected) {
             show.show_diff_offset = offset;
             None
         } else {
@@ -1522,11 +1574,7 @@ impl App {
 
     fn sync_show_selection_to_diff(&mut self) {
         let show = self.screen.show_mut().unwrap();
-        if let Some(selected) = file_at_patch_offset(
-            &show.show_diff_lines,
-            &show.show_files,
-            show.show_diff_offset,
-        ) {
+        if let Some(selected) = show.show_patch_index.file_at(show.show_diff_offset) {
             show.show_selected = Some(selected);
             show.show_explorer_offset = selected;
         }

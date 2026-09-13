@@ -2,7 +2,8 @@
 //!
 //! This module translates Crossterm events into shared keys, drives [`App`],
 //! and renders log, preview, help, show, and status state with Ratatui. It also owns
-//! setup and restoration of the terminal session.
+//! setup and restoration of the terminal session. Per-document render caches keep
+//! Ratatui styling local to terminal-visible rows across redraws.
 
 use std::io::{self, Stdout, Write};
 use std::time::Duration;
@@ -33,6 +34,7 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
     let mut log_state = ListState::default();
     let mut show_state = ListState::default();
     let mut status_states = [ListState::default(), ListState::default()];
+    let mut caches = RenderCaches::default();
     while app.is_running() {
         session.terminal.draw(|frame| {
             render_with_states(
@@ -41,6 +43,7 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
                 &mut log_state,
                 &mut show_state,
                 &mut status_states,
+                &mut caches,
             )
         })?;
         if event::poll(Duration::from_millis(250))? {
@@ -171,7 +174,15 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
 fn render(frame: &mut ratatui::Frame<'_>, app: &App, log_state: &mut ListState) {
     let mut show_state = ListState::default();
     let mut status_states = [ListState::default(), ListState::default()];
-    render_with_states(frame, app, log_state, &mut show_state, &mut status_states);
+    let mut caches = RenderCaches::default();
+    render_with_states(
+        frame,
+        app,
+        log_state,
+        &mut show_state,
+        &mut status_states,
+        &mut caches,
+    );
 }
 
 fn render_with_states(
@@ -180,6 +191,7 @@ fn render_with_states(
     log_state: &mut ListState,
     show_state: &mut ListState,
     status_states: &mut [ListState; 2],
+    caches: &mut RenderCaches,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -215,29 +227,24 @@ fn render_with_states(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[0]);
                 frame.render_stateful_widget(list, panes[0], log_state);
-                let preview = app
-                    .log_state()
-                    .preview_lines()
-                    .iter()
-                    .map(|line| highlighted_line(line, app.preview_search_query()))
-                    .collect::<Vec<_>>();
+                let preview = caches.preview.visible_lines(
+                    app.log_state().preview_lines(),
+                    app.log_state().preview_revision(),
+                    app.preview_search_query(),
+                    log.preview_offset(),
+                    log.preview_horizontal_offset(),
+                    paragraph_height(panes[1]),
+                );
                 frame.render_widget(
-                    Paragraph::new(preview)
-                        .scroll((
-                            log.preview_offset().try_into().unwrap_or(u16::MAX),
-                            log.preview_horizontal_offset()
-                                .try_into()
-                                .unwrap_or(u16::MAX),
-                        ))
-                        .block(
-                            Block::default()
-                                .title(if log.preview_focused() {
-                                    " preview (focused) "
-                                } else {
-                                    " preview "
-                                })
-                                .borders(Borders::ALL),
-                        ),
+                    Paragraph::new(preview).scroll((0, 0)).block(
+                        Block::default()
+                            .title(if log.preview_focused() {
+                                " preview (focused) "
+                            } else {
+                                " preview "
+                            })
+                            .borders(Borders::ALL),
+                    ),
                     panes[1],
                 );
             } else {
@@ -256,15 +263,21 @@ fn render_with_states(
                 chunks[0],
             );
         }
-        Screen::Show(show) => {
-            render_show(frame, show, app.show_search_query(), chunks[0], show_state)
-        }
+        Screen::Show(show) => render_show(
+            frame,
+            show,
+            app.show_search_query(),
+            chunks[0],
+            show_state,
+            &mut caches.show_diff,
+        ),
         Screen::Status(status) => render_status(
             frame,
             status,
             app.status_search_query(),
             chunks[0],
             status_states,
+            caches,
         ),
     }
 
@@ -278,6 +291,7 @@ fn render_show(
     search_query: Option<&str>,
     area: ratatui::layout::Rect,
     show_state: &mut ListState,
+    cache: &mut DocumentCache,
 ) {
     let panes = Layout::default()
         .direction(content_split_direction(area))
@@ -314,8 +328,13 @@ fn render_show(
         explorer_chunks[0],
     );
 
-    let files = show
-        .files()
+    let (range, selected, list_offset) = list_window(
+        show.files().len(),
+        show.selected(),
+        show_state.offset(),
+        explorer_chunks[1],
+    );
+    let files = show.files()[range]
         .iter()
         .map(|file| {
             ListItem::new(scrolled_line(
@@ -325,7 +344,8 @@ fn render_show(
             ))
         })
         .collect::<Vec<_>>();
-    show_state.select(show.selected());
+    *show_state.offset_mut() = 0;
+    show_state.select(selected);
     let files = List::new(files)
         .block(
             Block::default()
@@ -339,27 +359,26 @@ fn render_show(
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(files, explorer_chunks[1], show_state);
+    *show_state.offset_mut() = list_offset;
 
-    let diff = show
-        .diff_lines()
-        .iter()
-        .map(|line| highlighted_line(line, search_query))
-        .collect::<Vec<_>>();
+    let diff = cache.visible_lines(
+        show.diff_lines(),
+        show.diff_revision(),
+        search_query,
+        show.diff_offset(),
+        show.diff_horizontal_offset(),
+        paragraph_height(panes[1]),
+    );
     frame.render_widget(
-        Paragraph::new(diff)
-            .scroll((
-                show.diff_offset().try_into().unwrap_or(u16::MAX),
-                show.diff_horizontal_offset().try_into().unwrap_or(u16::MAX),
-            ))
-            .block(
-                Block::default()
-                    .title(if show.focus() == ShowFocus::Diff {
-                        " diff (focused) "
-                    } else {
-                        " diff "
-                    })
-                    .borders(Borders::ALL),
-            ),
+        Paragraph::new(diff).scroll((0, 0)).block(
+            Block::default()
+                .title(if show.focus() == ShowFocus::Diff {
+                    " diff (focused) "
+                } else {
+                    " diff "
+                })
+                .borders(Borders::ALL),
+        ),
         panes[1],
     );
 }
@@ -370,6 +389,7 @@ fn render_status(
     search_query: Option<&str>,
     area: ratatui::layout::Rect,
     status_states: &mut [ListState; 2],
+    caches: &mut RenderCaches,
 ) {
     let panes = Layout::default()
         .direction(content_split_direction(area))
@@ -380,8 +400,16 @@ fn render_status(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(panes[0]);
 
-    let staged_items = status
-        .staged()
+    let staged_selected = (status.group() == StatusGroup::Staged)
+        .then_some(status.staged_selected())
+        .flatten();
+    let (staged_range, staged_selected, staged_offset) = list_window(
+        status.staged().len(),
+        staged_selected,
+        status_states[0].offset(),
+        explorer_chunks[0],
+    );
+    let staged_items = status.staged()[staged_range]
         .iter()
         .map(|file| {
             ListItem::new(scrolled_line(
@@ -391,11 +419,8 @@ fn render_status(
             ))
         })
         .collect::<Vec<_>>();
-    status_states[0].select(
-        (status.group() == StatusGroup::Staged)
-            .then_some(status.staged_selected())
-            .flatten(),
-    );
+    *status_states[0].offset_mut() = 0;
+    status_states[0].select(staged_selected);
     let staged = List::new(staged_items)
         .block(
             Block::default()
@@ -413,9 +438,18 @@ fn render_status(
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(staged, explorer_chunks[0], &mut status_states[0]);
+    *status_states[0].offset_mut() = staged_offset;
 
-    let unstaged_items = status
-        .unstaged()
+    let unstaged_selected = (status.group() == StatusGroup::Unstaged)
+        .then_some(status.unstaged_selected())
+        .flatten();
+    let (unstaged_range, unstaged_selected, unstaged_offset) = list_window(
+        status.unstaged().len(),
+        unstaged_selected,
+        status_states[1].offset(),
+        explorer_chunks[1],
+    );
+    let unstaged_items = status.unstaged()[unstaged_range]
         .iter()
         .map(|file| {
             ListItem::new(scrolled_line(
@@ -425,11 +459,8 @@ fn render_status(
             ))
         })
         .collect::<Vec<_>>();
-    status_states[1].select(
-        (status.group() == StatusGroup::Unstaged)
-            .then_some(status.unstaged_selected())
-            .flatten(),
-    );
+    *status_states[1].offset_mut() = 0;
+    status_states[1].select(unstaged_selected);
     let unstaged = List::new(unstaged_items)
         .block(
             Block::default()
@@ -447,32 +478,156 @@ fn render_status(
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(unstaged, explorer_chunks[1], &mut status_states[1]);
+    *status_states[1].offset_mut() = unstaged_offset;
 
-    let diff = status
-        .diff_lines()
-        .iter()
-        .map(|line| highlighted_line(line, search_query))
-        .collect::<Vec<_>>();
+    let cache = match status.group() {
+        StatusGroup::Staged => &mut caches.staged_diff,
+        StatusGroup::Unstaged => &mut caches.unstaged_diff,
+    };
+    let diff = cache.visible_lines(
+        status.diff_lines(),
+        status.diff_revision(),
+        search_query,
+        status.diff_offset(),
+        status.diff_horizontal_offset(),
+        paragraph_height(panes[1]),
+    );
     frame.render_widget(
-        Paragraph::new(diff)
-            .scroll((
-                status.diff_offset().try_into().unwrap_or(u16::MAX),
-                status
-                    .diff_horizontal_offset()
-                    .try_into()
-                    .unwrap_or(u16::MAX),
-            ))
-            .block(
-                Block::default()
-                    .title(if status.focus() == StatusFocus::Diff {
-                        " diff (focused) "
-                    } else {
-                        " diff "
-                    })
-                    .borders(Borders::ALL),
-            ),
+        Paragraph::new(diff).scroll((0, 0)).block(
+            Block::default()
+                .title(if status.focus() == StatusFocus::Diff {
+                    " diff (focused) "
+                } else {
+                    " diff "
+                })
+                .borders(Borders::ALL),
+        ),
         panes[1],
     );
+}
+
+const WINDOW_OVERSCAN: usize = 2;
+
+#[derive(Default)]
+struct RenderCaches {
+    preview: DocumentCache,
+    show_diff: DocumentCache,
+    staged_diff: DocumentCache,
+    unstaged_diff: DocumentCache,
+}
+
+/// UI-local cache for one independently loaded document and search query.
+#[derive(Default)]
+struct DocumentCache {
+    revision: Option<u64>,
+    query: Option<String>,
+    lines: Vec<Option<Line<'static>>>,
+    #[cfg(test)]
+    parsed_lines: usize,
+}
+
+impl DocumentCache {
+    fn visible_lines(
+        &mut self,
+        source: &[String],
+        revision: u64,
+        query: Option<&str>,
+        offset: usize,
+        horizontal_offset: usize,
+        height: usize,
+    ) -> Vec<Line<'static>> {
+        let query = query.filter(|query| !query.is_empty());
+        if self.revision != Some(revision)
+            || self.query.as_deref() != query
+            || self.lines.len() != source.len()
+        {
+            self.revision = Some(revision);
+            self.query = query.map(str::to_owned);
+            self.lines = vec![None; source.len()];
+        }
+
+        if height == 0 {
+            return Vec::new();
+        }
+
+        let start = offset.min(source.len());
+        let end = start
+            .saturating_add(height.saturating_add(WINDOW_OVERSCAN))
+            .min(source.len());
+        (start..end)
+            .map(|index| {
+                let line = self.lines[index].get_or_insert_with(|| {
+                    #[cfg(test)]
+                    {
+                        self.parsed_lines += 1;
+                    }
+                    owned_line(highlighted_line(&source[index], query))
+                });
+                cropped_styled_line(line, horizontal_offset)
+            })
+            .collect()
+    }
+}
+
+fn paragraph_height(area: ratatui::layout::Rect) -> usize {
+    usize::from(area.height.saturating_sub(2))
+}
+
+fn list_window(
+    length: usize,
+    selected: Option<usize>,
+    previous_offset: usize,
+    area: ratatui::layout::Rect,
+) -> (std::ops::Range<usize>, Option<usize>, usize) {
+    let height = paragraph_height(area).max(1);
+    let mut start = previous_offset.min(length.saturating_sub(height));
+    if let Some(selected) = selected {
+        if selected < start {
+            start = selected;
+        } else if selected >= start.saturating_add(height) {
+            start = selected.saturating_add(1).saturating_sub(height);
+        }
+    }
+    let end = start.saturating_add(height).min(length);
+    (
+        start..end,
+        selected.map(|index| index.saturating_sub(start)),
+        start,
+    )
+}
+
+fn owned_line(line: Line<'_>) -> Line<'static> {
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|span| Span::styled(span.content.into_owned(), span.style))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn cropped_styled_line(line: &Line<'_>, offset: usize) -> Line<'static> {
+    if offset == 0 {
+        return owned_line(line.clone());
+    }
+    let mut remaining = offset;
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let mut content = String::new();
+        for grapheme in span.content.graphemes(true) {
+            let width = UnicodeWidthStr::width(grapheme);
+            if remaining >= width {
+                remaining -= width;
+            } else if remaining > 0 {
+                remaining = 0;
+            } else {
+                content.push_str(grapheme);
+            }
+        }
+        if !content.is_empty() {
+            spans.push(Span::styled(content, span.style));
+        }
+    }
+    Line::from(spans)
 }
 
 fn styled_line(text: &str) -> Line<'_> {
@@ -733,6 +888,7 @@ mod tests {
         preview: Vec<String>,
         show: ShowData,
         status: StatusData,
+        next_status: Option<StatusData>,
     }
 
     impl HistorySource for FixtureHistory {
@@ -757,6 +913,13 @@ mod tests {
         fn load_status(&mut self) -> Result<StatusData, GitError> {
             Ok(self.status.clone())
         }
+
+        fn toggle_stage(&mut self, _staged: bool, _file: &StatusFile) -> Result<(), GitError> {
+            if let Some(status) = self.next_status.take() {
+                self.status = status;
+            }
+            Ok(())
+        }
     }
 
     fn app_with_history(
@@ -770,6 +933,7 @@ mod tests {
             preview,
             show,
             status: StatusData::default(),
+            next_status: None,
         };
         app.initialize(&mut history).unwrap();
         (app, history)
@@ -1061,6 +1225,207 @@ mod tests {
     }
 
     #[test]
+    fn document_cache_parses_only_visible_rows_and_rekeys_on_change() {
+        let source = (0..100)
+            .map(|index| format!("row {index}"))
+            .collect::<Vec<_>>();
+        let mut cache = DocumentCache::default();
+
+        let first = cache.visible_lines(&source, 1, None, 40, 0, 3);
+        assert_eq!(first.len(), 5);
+        assert_eq!(cache.parsed_lines, 5);
+        cache.visible_lines(&source, 1, None, 40, 0, 3);
+        assert_eq!(cache.parsed_lines, 5);
+        cache.visible_lines(&source, 1, None, 41, 0, 3);
+        assert_eq!(cache.parsed_lines, 6);
+        cache.visible_lines(&source, 1, Some("row"), 41, 0, 3);
+        assert_eq!(cache.parsed_lines, 11);
+        cache.visible_lines(&source, 2, Some("row"), 41, 0, 3);
+        assert_eq!(cache.parsed_lines, 16);
+        assert!(
+            cache
+                .visible_lines(&source, 2, Some("row"), 41, 0, 0)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn document_cache_preserves_styling_when_cropping_highlighted_rows() {
+        let source = vec!["hidden \x1b[31mse\x1b[32march\x1b[m visible".into()];
+        let mut cache = DocumentCache::default();
+        let line = cache
+            .visible_lines(&source, 1, Some("SEARCH"), 0, 7, 1)
+            .pop()
+            .expect("visible line");
+        assert_eq!(line.to_string(), "search visible");
+        let highlighted = line
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(Color::Yellow))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(highlighted, "search");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Black));
+    }
+
+    #[test]
+    fn persistent_preview_cache_replaces_rows_after_reload() {
+        let (mut app, mut history) = app_with_history(
+            vec![
+                CommitRecord {
+                    id: "one".into(),
+                    display: "one".into(),
+                },
+                CommitRecord {
+                    id: "two".into(),
+                    display: "two".into(),
+                },
+            ],
+            vec!["first preview".into()],
+            ShowData::default(),
+        );
+        let mut log_state = ListState::default();
+        let mut show_state = ListState::default();
+        let mut status_states = [ListState::default(), ListState::default()];
+        let mut caches = RenderCaches::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_with_states(
+                    frame,
+                    &app,
+                    &mut log_state,
+                    &mut show_state,
+                    &mut status_states,
+                    &mut caches,
+                )
+            })
+            .unwrap();
+
+        history.preview = vec!["second preview".into()];
+        app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
+        terminal
+            .draw(|frame| {
+                render_with_states(
+                    frame,
+                    &app,
+                    &mut log_state,
+                    &mut show_state,
+                    &mut status_states,
+                    &mut caches,
+                )
+            })
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("second preview"));
+        assert!(!text.contains("first preview"));
+    }
+
+    #[test]
+    fn persistent_status_cache_replaces_rows_after_refresh() {
+        let file = StatusFile {
+            display: " M file.rs".into(),
+            old_path: Some(b"file.rs".to_vec()),
+            new_path: Some(b"file.rs".to_vec()),
+        };
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "one".into(),
+                display: "one".into(),
+            }],
+            Vec::new(),
+            ShowData::default(),
+        );
+        history.status = StatusData {
+            unstaged: vec![file.clone()],
+            unstaged_diff: vec!["first status diff".into()],
+            ..StatusData::default()
+        };
+        history.next_status = Some(StatusData {
+            unstaged: vec![file],
+            unstaged_diff: vec!["second status diff".into()],
+            ..StatusData::default()
+        });
+        app.dispatch(Action::Status(StatusAction::Open), &mut history);
+        let mut log_state = ListState::default();
+        let mut show_state = ListState::default();
+        let mut status_states = [ListState::default(), ListState::default()];
+        let mut caches = RenderCaches::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_with_states(
+                    frame,
+                    &app,
+                    &mut log_state,
+                    &mut show_state,
+                    &mut status_states,
+                    &mut caches,
+                )
+            })
+            .unwrap();
+
+        app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
+        terminal
+            .draw(|frame| {
+                render_with_states(
+                    frame,
+                    &app,
+                    &mut log_state,
+                    &mut show_state,
+                    &mut status_states,
+                    &mut caches,
+                )
+            })
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("second status diff"));
+        assert!(!text.contains("first status diff"));
+    }
+
+    #[test]
+    fn list_window_bounds_explorer_work_to_the_viewport() {
+        let area = ratatui::layout::Rect::new(0, 0, 20, 8);
+        let (range, selected, offset) = list_window(100, Some(99), 0, area);
+        assert_eq!(range, 94..100);
+        assert_eq!(selected, Some(5));
+        assert_eq!(offset, 94);
+    }
+
+    #[test]
+    fn renders_show_diff_at_a_large_usize_offset() {
+        let mut show = show_data();
+        show.diff = (0..70_000)
+            .map(|index| format!("source row {index}"))
+            .collect();
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            Vec::new(),
+            show,
+        );
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        for _ in 0..6_553 {
+            app.dispatch(Action::Navigation(NavigationAction::PageDown), &mut history);
+        }
+        for _ in 0..6 {
+            app.dispatch(Action::Navigation(NavigationAction::MoveDown), &mut history);
+        }
+
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("source row 65536"));
+        assert!(!text.contains("source row 65535"));
+    }
+
+    #[test]
     fn renders_preview_in_both_orientations_and_marks_focus() {
         let (mut app, mut history) = app_with_history(
             vec![CommitRecord {
@@ -1210,6 +1575,7 @@ mod tests {
                 staged_diff: vec!["\x1b[31mdiff --git a/staged.rs b/staged.rs\x1b[m".into()],
                 unstaged_diff: vec!["untracked output".into()],
             },
+            next_status: None,
         };
         app.initialize(&mut history).unwrap();
         app.dispatch(Action::Status(StatusAction::Open), &mut history);
