@@ -27,5 +27,5 @@
 - [ ] (M) Simplify case_insensitive_match_ranges() and possibly other places assuming that we only support Latin alphabet.
 - [ ] (S) Don't show "Focus the show diff to search". Always search through diff.
 - [x] (S) There is no returning back from search state. Once searched, you always see highlighted search results. ESC does't reset search.
-- [ ] (S) In show mode: split file explorer and diff tabs with 1:2 ratio (diff should be wider).
+- [-] (S) In show mode: split file explorer and diff tabs with 1:2 ratio (diff should be wider).
 - [ ] (L) Make diff filter not dependent on delta output, make it usable with non-delta. E.g. function like is_delta_decoration_rule(), delta_header_paths(), etc should be generic. Expand filter configuration to be able to easily achieve that (e.g. config for file tags, decorations, etc.).
