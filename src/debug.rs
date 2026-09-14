@@ -79,6 +79,7 @@ pub fn snapshot(app: &App) -> String {
             ShowFocus::Diff => "diff",
         };
         writeln!(output, "show.focus={focus}").unwrap();
+        writeln!(output, "show.diff.fullscreen={}", show.diff_fullscreen()).unwrap();
         writeln!(
             output,
             "show.selected={}",
@@ -152,6 +153,12 @@ pub fn snapshot(app: &App) -> String {
             StatusGroup::Unstaged => "unstaged",
         };
         writeln!(output, "status.focus={focus}").unwrap();
+        writeln!(
+            output,
+            "status.diff.fullscreen={}",
+            status.diff_fullscreen()
+        )
+        .unwrap();
         writeln!(output, "status.group={group}").unwrap();
         writeln!(
             output,

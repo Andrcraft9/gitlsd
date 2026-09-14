@@ -132,6 +132,7 @@ pub struct HelpState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShowState {
     show_focus: ShowFocus,
+    show_diff_fullscreen: bool,
     show_metadata: Vec<String>,
     show_files: Vec<ChangedFile>,
     show_diff_lines: Vec<String>,
@@ -149,6 +150,7 @@ pub struct ShowState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusState {
     status_focus: StatusFocus,
+    status_diff_fullscreen: bool,
     active_group: StatusGroup,
     staged: Vec<StatusFile>,
     unstaged: Vec<StatusFile>,
@@ -179,6 +181,7 @@ impl Default for ShowState {
     fn default() -> Self {
         Self {
             show_focus: ShowFocus::Explorer,
+            show_diff_fullscreen: false,
             show_metadata: Vec::new(),
             show_files: Vec::new(),
             show_diff_lines: Vec::new(),
@@ -198,6 +201,7 @@ impl Default for StatusState {
     fn default() -> Self {
         Self {
             status_focus: StatusFocus::Explorer,
+            status_diff_fullscreen: false,
             active_group: StatusGroup::Unstaged,
             staged: Vec::new(),
             unstaged: Vec::new(),
@@ -274,6 +278,10 @@ impl ShowState {
         self.show_focus
     }
 
+    pub fn diff_fullscreen(&self) -> bool {
+        self.show_diff_fullscreen
+    }
+
     pub fn metadata(&self) -> &[String] {
         &self.show_metadata
     }
@@ -335,6 +343,10 @@ impl StatusState {
 
     pub fn focus(&self) -> StatusFocus {
         self.status_focus
+    }
+
+    pub fn diff_fullscreen(&self) -> bool {
+        self.status_diff_fullscreen
     }
 
     pub fn group(&self) -> StatusGroup {
@@ -523,12 +535,30 @@ impl App {
                         self.focus_show_diff();
                     } else if matches!(
                         self.screen,
+                        Screen::Show(ShowState {
+                            show_focus: ShowFocus::Diff,
+                            show_diff_fullscreen: false,
+                            ..
+                        })
+                    ) {
+                        self.screen.show_mut().unwrap().show_diff_fullscreen = true;
+                    } else if matches!(
+                        self.screen,
                         Screen::Status(StatusState {
                             status_focus: StatusFocus::Explorer,
                             ..
                         })
                     ) {
                         self.focus_status_diff();
+                    } else if matches!(
+                        self.screen,
+                        Screen::Status(StatusState {
+                            status_focus: StatusFocus::Diff,
+                            status_diff_fullscreen: false,
+                            ..
+                        })
+                    ) {
+                        self.screen.status_mut().unwrap().status_diff_fullscreen = true;
                     }
                     return;
                 }
@@ -813,7 +843,9 @@ impl App {
                         self.status.clear();
                     }
                     ActivePane::Show(ShowFocus::Diff) => {
-                        self.screen.show_mut().unwrap().show_focus = ShowFocus::Explorer;
+                        let show = self.screen.show_mut().unwrap();
+                        show.show_diff_fullscreen = false;
+                        show.show_focus = ShowFocus::Explorer;
                         self.input = InputMode::Normal;
                     }
                     ActivePane::Status(StatusFocus::Explorer) => {
@@ -822,7 +854,9 @@ impl App {
                         self.status.clear();
                     }
                     ActivePane::Status(StatusFocus::Diff) => {
-                        self.screen.status_mut().unwrap().status_focus = StatusFocus::Explorer;
+                        let status = self.screen.status_mut().unwrap();
+                        status.status_diff_fullscreen = false;
+                        status.status_focus = StatusFocus::Explorer;
                         self.input = InputMode::Normal;
                     }
                     ActivePane::Help => {

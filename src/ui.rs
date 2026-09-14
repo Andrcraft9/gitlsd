@@ -136,6 +136,9 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
         }
         Screen::Log => chunks[0],
         Screen::Show(show) => {
+            if show.diff_fullscreen() {
+                return usize::from(chunks[0].width.saturating_sub(2));
+            }
             let panes = Layout::default()
                 .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -146,6 +149,9 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
             }
         }
         Screen::Status(status) => {
+            if status.diff_fullscreen() {
+                return usize::from(chunks[0].width.saturating_sub(2));
+            }
             let panes = Layout::default()
                 .direction(content_split_direction(chunks[0]))
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -293,6 +299,22 @@ fn render_show(
     show_state: &mut ListState,
     cache: &mut DocumentCache,
 ) {
+    if show.diff_fullscreen() {
+        render_diff(
+            frame,
+            DiffRender {
+                lines: show.diff_lines(),
+                revision: show.diff_revision(),
+                search_query,
+                offset: show.diff_offset(),
+                horizontal_offset: show.diff_horizontal_offset(),
+            },
+            area,
+            cache,
+        );
+        return;
+    }
+
     let panes = Layout::default()
         .direction(content_split_direction(area))
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -391,6 +413,26 @@ fn render_status(
     status_states: &mut [ListState; 2],
     caches: &mut RenderCaches,
 ) {
+    if status.diff_fullscreen() {
+        let cache = match status.group() {
+            StatusGroup::Staged => &mut caches.staged_diff,
+            StatusGroup::Unstaged => &mut caches.unstaged_diff,
+        };
+        render_diff(
+            frame,
+            DiffRender {
+                lines: status.diff_lines(),
+                revision: status.diff_revision(),
+                search_query,
+                offset: status.diff_offset(),
+                horizontal_offset: status.diff_horizontal_offset(),
+            },
+            area,
+            cache,
+        );
+        return;
+    }
+
     let panes = Layout::default()
         .direction(content_split_direction(area))
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -503,6 +545,38 @@ fn render_status(
                 .borders(Borders::ALL),
         ),
         panes[1],
+    );
+}
+
+struct DiffRender<'a> {
+    lines: &'a [String],
+    revision: u64,
+    search_query: Option<&'a str>,
+    offset: usize,
+    horizontal_offset: usize,
+}
+
+fn render_diff(
+    frame: &mut ratatui::Frame<'_>,
+    document: DiffRender<'_>,
+    area: ratatui::layout::Rect,
+    cache: &mut DocumentCache,
+) {
+    let diff = cache.visible_lines(
+        document.lines,
+        document.revision,
+        document.search_query,
+        document.offset,
+        document.horizontal_offset,
+        paragraph_height(area),
+    );
+    frame.render_widget(
+        Paragraph::new(diff).scroll((0, 0)).block(
+            Block::default()
+                .title(" diff (focused) ")
+                .borders(Borders::ALL),
+        ),
+        area,
     );
 }
 
@@ -1062,6 +1136,12 @@ mod tests {
             app.handle_key(Key::Enter, &mut history);
             let diff_width = usize::from(panes[1].width.saturating_sub(2));
             assert_eq!(active_content_width(area, &app), diff_width);
+
+            app.handle_key(Key::Enter, &mut history);
+            assert_eq!(
+                active_content_width(area, &app),
+                usize::from(content.width.saturating_sub(2))
+            );
             app.handle_key(Key::Escape, &mut history);
         }
     }
@@ -1549,6 +1629,32 @@ mod tests {
                 .fg,
             Some(Color::Indexed(1))
         );
+
+        app.handle_key(Key::Enter, &mut history);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("diff (focused)"));
+        assert!(text.contains("diff --git"));
+        assert!(!text.contains("commit full-id"));
+        assert!(!text.contains(" files "));
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((1, 1))
+                .expect("fullscreen styled diff line")
+                .style()
+                .fg,
+            Some(Color::Indexed(1))
+        );
+
+        app.handle_key(Key::Escape, &mut history);
+        let show = app.screen().show().unwrap();
+        assert_eq!(show.focus(), ShowFocus::Explorer);
+        assert!(!show.diff_fullscreen());
     }
 
     #[test]
@@ -1631,6 +1737,22 @@ mod tests {
                 .fg,
             Some(Color::Indexed(1))
         );
+
+        app.handle_key(Key::Enter, &mut history);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("diff (focused)"));
+        assert!(text.contains("diff --git a/staged.rs b/staged.rs"));
+        assert!(!text.contains("unstaged"));
+
+        app.handle_key(Key::Char('q'), &mut history);
+        let status = app.screen().status().unwrap();
+        assert_eq!(status.focus(), StatusFocus::Explorer);
+        assert_eq!(status.group(), StatusGroup::Staged);
+        assert!(!status.diff_fullscreen());
     }
 
     #[test]

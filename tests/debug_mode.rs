@@ -788,6 +788,20 @@ fn show_file_navigation_focus_and_escape_preserve_log_selection() {
 }
 
 #[test]
+fn focused_show_diff_expands_fullscreen_and_back_returns_to_files() {
+    for back in ["esc", "q"] {
+        let output = stdout(run(&format!("d;enter;enter;{back}"), ""));
+        assert!(output.contains("screen=show\n"));
+        assert!(output.contains("show.focus=explorer\n"));
+        assert!(output.contains("show.diff.fullscreen=false\n"));
+    }
+
+    let fullscreen = stdout(run("d;enter;enter", ""));
+    assert!(fullscreen.contains("show.focus=diff\n"));
+    assert!(fullscreen.contains("show.diff.fullscreen=true\n"));
+}
+
+#[test]
 fn show_diff_scrolling_updates_the_file_explorer_selection() {
     let output = stdout(run(
         "d;enter;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down",
@@ -870,6 +884,23 @@ fn status_uses_the_staged_diff_and_syncs_selection_across_multiple_patches() {
     assert!(searched.contains("status.selected=2\n"));
     assert!(searched.contains("status.staged.selected=2\n"));
     assert!(searched.contains("status=Match for `staged`\n"));
+}
+
+#[test]
+fn focused_status_diff_expands_fullscreen_and_back_returns_to_active_group() {
+    for back in ["esc", "q"] {
+        let directory = status_fixture();
+        let output = stdout(run_in(&directory, "s;tab;enter;enter", ""));
+        assert!(output.contains("status.focus=diff\n"));
+        assert!(output.contains("status.group=staged\n"));
+        assert!(output.contains("status.diff.fullscreen=true\n"));
+
+        let output = stdout(run_in(&directory, &format!("s;tab;enter;enter;{back}"), ""));
+        assert!(output.contains("screen=status\n"));
+        assert!(output.contains("status.focus=explorer\n"));
+        assert!(output.contains("status.group=staged\n"));
+        assert!(output.contains("status.diff.fullscreen=false\n"));
+    }
 }
 
 #[test]

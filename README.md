@@ -26,7 +26,7 @@
 | `s` | Toggle status |
 | Tab | Switch status group |
 | `u` | Stage or unstage file |
-| Enter | Open selection |
+| Enter | Open selection; expand a focused diff full screen |
 
 Commands: `:help` (`:h`) and `:quit` (`:q`).
 
