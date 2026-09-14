@@ -11,7 +11,7 @@
 - [ ] Multi-line log entries: navigate entries not lines
 - [x] Show mode: file explorer, diff per file
 - [x] Status mode (staged/unstaged changes)
-- [ ] Configurable Editor: be able to open any file in Editor from gitlsd.
+- [x] Configurable Editor: be able to open any file in Editor from gitlsd.
 
 ## Planned: improvements
 (L) - large; (M) - medium; (S) - small.

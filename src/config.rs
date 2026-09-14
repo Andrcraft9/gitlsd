@@ -47,6 +47,7 @@ pub enum SearchAction {
 pub enum GlobalAction {
     Command,
     Help,
+    OpenEditor,
     Back,
     Quit,
 }
@@ -69,7 +70,7 @@ pub enum StatusAction {
 }
 
 impl Action {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
         Self::Navigation(NavigationAction::PageDown),
@@ -83,6 +84,7 @@ impl Action {
         Self::Search(SearchAction::Previous),
         Self::Global(GlobalAction::Command),
         Self::Global(GlobalAction::Help),
+        Self::Global(GlobalAction::OpenEditor),
         Self::Global(GlobalAction::Back),
         Self::Global(GlobalAction::Quit),
         Self::Preview(PreviewAction::Toggle),
@@ -134,6 +136,7 @@ impl GlobalAction {
         match self {
             Self::Command => "command",
             Self::Help => "help",
+            Self::OpenEditor => "open-editor",
             Self::Back => "back",
             Self::Quit => "quit",
         }
@@ -256,6 +259,7 @@ pub struct Config {
     pub show_command: Vec<String>,
     pub status_diff_command: Vec<String>,
     pub diff_filter: Option<Vec<String>>,
+    pub editor_command: Vec<String>,
     pub batch_size: usize,
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
@@ -288,6 +292,7 @@ impl Default for Config {
             (Key::Char('N'), Action::Search(SearchAction::Previous)),
             (Key::Char(':'), Action::Global(GlobalAction::Command)),
             (Key::Char('?'), Action::Global(GlobalAction::Help)),
+            (Key::Char('e'), Action::Global(GlobalAction::OpenEditor)),
             (Key::Escape, Action::Global(GlobalAction::Back)),
             (Key::Char('q'), Action::Global(GlobalAction::Back)),
             (Key::Ctrl('c'), Action::Global(GlobalAction::Quit)),
@@ -330,6 +335,7 @@ impl Default for Config {
             ],
             status_diff_command: vec!["git".into(), "diff".into(), "--color=always".into()],
             diff_filter: None,
+            editor_command: vec!["micro".into(), "+line".into(), "file".into()],
             batch_size: 100,
             bindings,
             source: None,
@@ -506,6 +512,25 @@ impl Config {
                 }
                 self.diff_filter = (!values.is_empty()).then(|| values.to_vec());
             }
+            "editor" => {
+                if values.first().is_none_or(String::is_empty)
+                    || values.iter().any(|value| value.contains('\0'))
+                {
+                    return Err(ConfigError::new(
+                        location,
+                        "editor requires a nonempty executable and arguments without NUL bytes",
+                    ));
+                }
+                if !values.iter().any(|value| editor_placeholder(value, "file"))
+                    || !values.iter().any(|value| editor_placeholder(value, "line"))
+                {
+                    return Err(ConfigError::new(
+                        location,
+                        "editor requires both file and line placeholders",
+                    ));
+                }
+                self.editor_command = values.to_vec();
+            }
             "status-diff" => {
                 validate_status_diff(values, location)?;
                 self.status_diff_command = values.to_vec();
@@ -602,6 +627,14 @@ impl Config {
                     .join(" ")
             ),
             format!(
+                "setting.editor={}",
+                self.editor_command
+                    .iter()
+                    .map(|argument| quote_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            format!(
                 "setting.config={}",
                 self.source
                     .as_ref()
@@ -634,6 +667,7 @@ impl Config {
                 "set diff-filter = {}",
                 format_arguments(self.diff_filter.as_deref().unwrap_or_default())
             ),
+            format!("set editor = {}", format_arguments(&self.editor_command)),
         ];
         lines.extend(
             self.bindings
@@ -642,6 +676,13 @@ impl Config {
         );
         format!("{}\n", lines.join("\n"))
     }
+}
+
+fn editor_placeholder(argument: &str, name: &str) -> bool {
+    argument == name
+        || argument == format!("+{name}")
+        || argument == "file:line"
+        || argument.contains(&format!("{{{name}}}"))
 }
 
 fn validate_show(arguments: &[String], setting: &str, location: &str) -> Result<(), ConfigError> {
@@ -871,8 +912,51 @@ mod tests {
         assert_eq!(parsed.show_command, default.show_command);
         assert_eq!(parsed.status_diff_command, default.status_diff_command);
         assert_eq!(parsed.diff_filter, default.diff_filter);
+        assert_eq!(parsed.editor_command, default.editor_command);
         assert_eq!(parsed.batch_size, default.batch_size);
         assert_eq!(parsed.bindings, default.bindings);
+    }
+
+    #[test]
+    fn editor_defaults_to_micro_and_accepts_vscode_placeholders() {
+        let default = Config::default();
+        assert_eq!(default.editor_command, ["micro", "+line", "file"]);
+        assert_eq!(
+            default.action_for(&Key::Char('e')),
+            Some(Action::Global(GlobalAction::OpenEditor))
+        );
+
+        let config = Config::parse(
+            "set editor = code -g --goto file:line\nbind v open-editor\n",
+            Path::new("editor.conf"),
+        )
+        .unwrap();
+        assert_eq!(config.editor_command, ["code", "-g", "--goto", "file:line"]);
+        assert_eq!(
+            config.action_for(&Key::Char('v')),
+            Some(Action::Global(GlobalAction::OpenEditor))
+        );
+        assert!(
+            config
+                .help_lines()
+                .contains(&"setting.editor=\"code\" \"-g\" \"--goto\" \"file:line\"".into())
+        );
+    }
+
+    #[test]
+    fn editor_rejects_an_empty_command() {
+        let error = Config::parse("set editor =\n", Path::new("editor.conf"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("editor requires a nonempty executable"));
+        let error = Config::parse("set editor = '' file line\n", Path::new("editor.conf"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("editor requires a nonempty executable"));
+        let error = Config::parse("set editor = vim\n", Path::new("editor.conf"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires both file and line placeholders"));
     }
 
     #[test]
@@ -1076,6 +1160,7 @@ mod tests {
             "search-previous",
             "command",
             "help",
+            "open-editor",
             "back",
             "quit",
             "toggle-preview",

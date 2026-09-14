@@ -2,8 +2,9 @@
 //!
 //! This module translates Crossterm events into shared keys, drives [`App`],
 //! and renders log, preview, help, show, and status state with Ratatui. It also owns
-//! setup and restoration of the terminal session. Per-document render caches keep
-//! Ratatui styling local to terminal-visible rows across redraws.
+//! setup, suspension, and restoration of the terminal session, including while
+//! a configured editor owns the terminal. Per-document render caches keep Ratatui
+//! styling local to terminal-visible rows across redraws.
 
 use std::io::{self, Stdout, Write};
 use std::time::Duration;
@@ -56,6 +57,12 @@ pub fn run(app: &mut App, source: &mut impl HistorySource) -> io::Result<()> {
                             app,
                         ));
                         app.handle_key(key, source);
+                        if let Some(request) = app.take_editor_request() {
+                            session.suspend()?;
+                            let result = request.run();
+                            session.resume()?;
+                            app.finish_editor(result, source);
+                        }
                     }
                 }
                 _ => {}
@@ -87,6 +94,18 @@ impl TerminalSession {
                 Err(error)
             }
         }
+    }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        restore_terminal(self.terminal.backend_mut())?;
+        self.terminal.show_cursor()
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        enter_terminal(self.terminal.backend_mut())?;
+        self.terminal.clear()
     }
 }
 

@@ -2,7 +2,8 @@
 //!
 //! [`App`] owns persistent log state plus enum-scoped help, show, and status state,
 //! input modes, commands, shutdown intent, and loaded-diff indexes/revisions that
-//! remain independent of terminal rendering.
+//! remain independent of terminal rendering. Editor actions become requests for
+//! the active frontend so terminal lifecycle stays outside the state machine.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +12,10 @@ use crate::config::{
     Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, SearchAction, ShowAction,
     StatusAction,
 };
+use crate::editor::EditorRequest;
 use crate::git::{
     ChangedFile, CommitRecord, GitError, HistorySource, PatchIndex, StatusData, StatusFile,
+    diff_line_number,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -440,6 +443,7 @@ pub struct App {
     status: String,
     running: bool,
     horizontal_viewport_width: usize,
+    editor_request: Option<EditorRequest>,
 }
 
 impl App {
@@ -466,6 +470,7 @@ impl App {
             status: String::new(),
             running: true,
             horizontal_viewport_width: 1,
+            editor_request: None,
         }
     }
 
@@ -593,11 +598,45 @@ impl App {
         self.config.help_lines()
     }
 
+    pub fn editor_request(&self) -> Option<&EditorRequest> {
+        self.editor_request.as_ref()
+    }
+
+    pub fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    pub fn finish_editor(&mut self, result: Result<(), String>, source: &mut impl HistorySource) {
+        if let Err(error) = result {
+            self.status = format!("Could not open editor: {error}");
+            return;
+        }
+        if matches!(self.screen, Screen::Status(_)) {
+            let focus_diff = self
+                .screen
+                .status()
+                .is_some_and(|status| status.status_focus == StatusFocus::Diff);
+            match source.load_status() {
+                Ok(data) => {
+                    self.replace_status_data(data);
+                    if focus_diff {
+                        self.focus_status_diff();
+                    }
+                }
+                Err(error) => {
+                    self.status = format!("Could not refresh status after editor: {error}");
+                }
+            }
+        } else {
+            self.status.clear();
+        }
+    }
+
     pub fn dispatch(&mut self, action: Action, source: &mut impl HistorySource) {
         match action {
             Action::Navigation(action) => self.dispatch_navigation(action, source),
             Action::Search(action) => self.dispatch_search(action, source),
-            Action::Global(action) => self.dispatch_global(action),
+            Action::Global(action) => self.dispatch_global(action, source),
             Action::Preview(action) => self.dispatch_preview_action(action, source),
             Action::Show(action) => self.dispatch_show_action(action, source),
             Action::Status(action) => self.dispatch_status_action(action, source),
@@ -806,7 +845,7 @@ impl App {
         }
     }
 
-    fn dispatch_global(&mut self, action: GlobalAction) {
+    fn dispatch_global(&mut self, action: GlobalAction, source: &mut impl HistorySource) {
         match action {
             GlobalAction::Command => {
                 if matches!(
@@ -827,6 +866,7 @@ impl App {
                 self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
+            GlobalAction::OpenEditor => self.request_editor(source),
             GlobalAction::Back => {
                 if self.clear_active_search() {
                     self.status.clear();
@@ -874,6 +914,62 @@ impl App {
                 self.status = "Quit requested".into();
             }
         }
+    }
+
+    fn request_editor(&mut self, source: &mut impl HistorySource) {
+        let target = match &self.screen {
+            Screen::Show(show) => show.show_selected.and_then(|selected| {
+                show.show_files.get(selected).and_then(|file| {
+                    file.worktree_path().map(|path| {
+                        let line = (show.show_focus == ShowFocus::Diff)
+                            .then(|| diff_line_number(&show.show_diff_lines, show.show_diff_offset))
+                            .flatten();
+                        (path.to_path_buf(), line)
+                    })
+                })
+            }),
+            Screen::Status(status) => {
+                let files = match status.active_group {
+                    StatusGroup::Staged => &status.staged,
+                    StatusGroup::Unstaged => &status.unstaged,
+                };
+                status.selected().and_then(|selected| {
+                    files.get(selected).and_then(|file| {
+                        file.worktree_path().map(|path| {
+                            let line = (status.status_focus == StatusFocus::Diff)
+                                .then(|| {
+                                    diff_line_number(status.diff_lines(), status.diff_offset())
+                                })
+                                .flatten();
+                            (path, line)
+                        })
+                    })
+                })
+            }
+            Screen::Log | Screen::Help(_) => None,
+        };
+        let Some((path, line)) = target else {
+            self.status = "Could not open editor: no worktree file is selected".into();
+            return;
+        };
+        let directory = match source.repository_root() {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.status = format!("Could not open editor: {error}");
+                return;
+            }
+        };
+        if !directory.join(&path).is_file() {
+            self.status = "Could not open editor: selected file is absent from the worktree".into();
+            return;
+        }
+        self.editor_request = Some(EditorRequest::new(
+            &self.config.editor_command,
+            directory,
+            &path,
+            line,
+        ));
+        self.status.clear();
     }
 
     fn clear_active_search(&mut self) -> bool {
@@ -2787,8 +2883,8 @@ mod tests {
         data.files = (0..25)
             .map(|index| ChangedFile {
                 display: format!("M file-{index}-with-a-long-name.rs"),
-                old_path: Some(format!("file-{index}.rs")),
-                new_path: Some(format!("file-{index}.rs")),
+                old_path: Some(format!("file-{index}.rs").into()),
+                new_path: Some(format!("file-{index}.rs").into()),
             })
             .collect();
         let mut app = App::new(Config::default());
@@ -2986,6 +3082,156 @@ mod tests {
         app.dispatch(Action::Show(ShowAction::Open), &mut empty_log);
         assert_eq!(app.screen, Screen::Log);
         assert_eq!(app.status, "Could not open show: No selected commit");
+    }
+
+    #[test]
+    fn editor_requests_follow_show_and_status_focus_and_diff_lines() {
+        struct RootHistory;
+
+        impl HistorySource for RootHistory {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+
+            fn repository_root(&mut self) -> Result<std::path::PathBuf, GitError> {
+                Ok(env!("CARGO_MANIFEST_DIR").into())
+            }
+        }
+
+        let config = Config {
+            editor_command: vec![
+                "code".into(),
+                "-g".into(),
+                "--goto".into(),
+                "file:line".into(),
+            ],
+            ..Config::default()
+        };
+        let diff = vec![
+            "diff --git a/src/lib.rs b/src/lib.rs".into(),
+            "@@ -10,2 +20,3 @@".into(),
+            " context".into(),
+            "+added".into(),
+        ];
+        let file = ChangedFile {
+            display: "M src/lib.rs".into(),
+            old_path: Some("src/lib.rs".into()),
+            new_path: Some("src/lib.rs".into()),
+        };
+        let mut app = App::new(config);
+        let mut history = RootHistory;
+        app.screen = Screen::Show(ShowState {
+            show_files: vec![file.clone()],
+            show_diff_lines: diff.clone(),
+            show_patch_index: PatchIndex::for_changed_files(&diff, &[file]),
+            show_selected: Some(0),
+            ..ShowState::default()
+        });
+
+        app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
+        assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:1");
+        app.take_editor_request();
+        {
+            let show = app.screen.show_mut().unwrap();
+            show.show_focus = ShowFocus::Diff;
+            show.show_diff_offset = 3;
+        }
+        app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
+        assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:21");
+        app.take_editor_request();
+
+        app.screen = Screen::Status(StatusState::from_data(StatusData {
+            unstaged: vec![StatusFile {
+                display: " M src/lib.rs".into(),
+                old_path: Some(b"src/lib.rs".to_vec()),
+                new_path: Some(b"src/lib.rs".to_vec()),
+            }],
+            unstaged_diff: diff,
+            ..StatusData::default()
+        }));
+        app.screen.status_mut().unwrap().active_group = StatusGroup::Unstaged;
+        app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
+        assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:1");
+        app.take_editor_request();
+        {
+            let status = app.screen.status_mut().unwrap();
+            status.status_focus = StatusFocus::Diff;
+            status.unstaged_diff_offset = 3;
+        }
+        app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
+        assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:21");
+        app.take_editor_request();
+
+        let status = app.screen.status_mut().unwrap();
+        status.status_focus = StatusFocus::Explorer;
+        status.unstaged[0].new_path = Some(b"missing.rs".to_vec());
+        app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
+        assert!(app.editor_request().is_none());
+        assert!(app.status.contains("absent from the worktree"));
+    }
+
+    fn assert_editor_request(request: &EditorRequest, target: &str) {
+        assert_eq!(
+            request.directory(),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        );
+        let command = request
+            .command()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(command, ["code", "-g", "--goto", target]);
+    }
+
+    #[test]
+    fn successful_editor_return_refreshes_status_data() {
+        struct RefreshHistory;
+
+        impl HistorySource for RefreshHistory {
+            fn load(
+                &mut self,
+                _offset: usize,
+                _limit: usize,
+            ) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                Ok(StatusData {
+                    unstaged: vec![StatusFile {
+                        display: " M refreshed.rs".into(),
+                        old_path: Some(b"refreshed.rs".to_vec()),
+                        new_path: Some(b"refreshed.rs".to_vec()),
+                    }],
+                    unstaged_diff: vec![
+                        "diff --git a/refreshed.rs b/refreshed.rs".into(),
+                        "@@ -1 +1 @@".into(),
+                        "+refreshed".into(),
+                    ],
+                    ..StatusData::default()
+                })
+            }
+        }
+
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Status(StatusState::from_data(StatusData {
+            unstaged: vec![StatusFile {
+                display: " M stale.rs".into(),
+                old_path: Some(b"stale.rs".to_vec()),
+                new_path: Some(b"stale.rs".to_vec()),
+            }],
+            unstaged_diff: vec!["stale".into()],
+            ..StatusData::default()
+        }));
+        app.finish_editor(Ok(()), &mut RefreshHistory);
+
+        let status = app.screen.status().unwrap();
+        assert_eq!(status.unstaged()[0].display, " M refreshed.rs");
+        assert_eq!(status.unstaged_diff().last().unwrap(), "+refreshed");
     }
 
     #[test]

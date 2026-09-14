@@ -26,6 +26,7 @@
 | `s` | Toggle status |
 | Tab | Switch status group |
 | `u` | Stage or unstage file |
+| `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
 Commands: `:help` (`:h`) and `:quit` (`:q`).
@@ -47,6 +48,7 @@ set show-commit = git show --no-patch
 set show = git show --patch --format=
 set status-diff = git diff --color=always
 set diff-filter = delta --paging never
+set editor = micro +line file
 bind j move-down
 bind x quit
 bind semicolon command
@@ -57,11 +59,14 @@ bind semicolon command
 - `preview`, `show-commit`, and `show` customize commit views.
 - `status-diff` customizes status diff presentation. Status discovery and staging commands remain fixed.
 - `diff-filter` optionally filters the full preview, show diff, and staged/unstaged diffs, including untracked files. It is disabled by default; `set diff-filter =` disables it explicitly.
+- `editor` defines the editor command and must include both file and line placeholders. Standalone `file` and `line`, micro's `+line`, VS Code's `file:line`, and embedded `{file}`/`{line}` forms are supported. It defaults to `micro +line file`. To use VS Code, set `editor = code -g --goto file:line`.
 - `bind` maps a character or named key to an action. Enter and Backspace are reserved for text input.
+
+The `open-editor` action works in the show and status file explorers and diff panes. Diff panes open at the worktree line represented by the top visible diff row; rows without a source-line mapping and explorer selections open at line 1. Deleted files cannot be opened because they are absent from the worktree.
 
 The example filter requires `delta` on PATH; delta is only needed when configured. Filters receive Git bytes on stdin and supply displayed text on stdout, using the same argument quoting as other commands. A launch failure or unsuccessful exit reports an error for the affected view without fallback. Empty diffs skip the filter. Safe ANSI colors are preserved; other terminal escape sequences are removed, and debug output remains plain text. File jumps recognize Git patch headers and delta's standard file headers. Other custom filters must preserve `diff --git` headers for file jumps and selection synchronization. `--paging never` disables delta's pager.
 
-Git and filter commands run directly without a shell. Git runs without an external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
+Git, filter, and editor commands run directly without a shell. Git runs without an external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
 
 ## Deterministic debug interface
 

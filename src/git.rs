@@ -32,9 +32,15 @@ pub struct ChangedFile {
     /// SGR sequences.
     pub display: String,
     /// The path on the old side of a rename or copy, when Git reports one.
-    pub old_path: Option<String>,
+    pub old_path: Option<PathBuf>,
     /// The path on the new side of a rename or copy, when Git reports one.
-    pub new_path: Option<String>,
+    pub new_path: Option<PathBuf>,
+}
+
+impl ChangedFile {
+    pub fn worktree_path(&self) -> Option<&Path> {
+        self.new_path.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -64,6 +70,12 @@ impl StatusFile {
 
     fn is_untracked(&self) -> bool {
         self.display.starts_with("?? ")
+    }
+
+    pub fn worktree_path(&self) -> Option<PathBuf> {
+        self.new_path
+            .as_deref()
+            .map(|path| PathBuf::from(os_string_from_bytes(path)))
     }
 }
 
@@ -95,8 +107,14 @@ impl PatchIndex {
             .iter()
             .map(|file| ChangedFile {
                 display: file.display.clone(),
-                old_path: file.old_path.as_deref().map(display_raw_path),
-                new_path: file.new_path.as_deref().map(display_raw_path),
+                old_path: file
+                    .old_path
+                    .as_deref()
+                    .map(|path| PathBuf::from(os_string_from_bytes(path))),
+                new_path: file
+                    .new_path
+                    .as_deref()
+                    .map(|path| PathBuf::from(os_string_from_bytes(path))),
             })
             .collect::<Vec<_>>();
         Self::build(lines, &files)
@@ -120,7 +138,7 @@ impl PatchIndex {
         for (file_index, file) in files.iter().enumerate() {
             for path in file.old_path.iter().chain(file.new_path.iter()) {
                 file_lookup
-                    .entry(path.clone())
+                    .entry(display_path(path))
                     .or_default()
                     .push(file_index);
             }
@@ -242,6 +260,9 @@ pub trait HistorySource {
             stage: "mutation".into(),
             reason: "status mutations are unavailable".into(),
         })
+    }
+    fn repository_root(&mut self) -> Result<PathBuf, GitError> {
+        current_directory()
     }
 }
 
@@ -578,6 +599,10 @@ impl GitHistory {
 }
 
 impl HistorySource for GitHistory {
+    fn repository_root(&mut self) -> Result<PathBuf, GitError> {
+        GitHistory::repository_root(self)
+    }
+
     fn load(&mut self, offset: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
         let mut arguments = self.command[1..].to_vec();
         let insertion = arguments
@@ -625,7 +650,7 @@ impl HistorySource for GitHistory {
         .map(|line| safe_text(line, true))
         .collect();
 
-        let files = parse_changed_files(&self.run_show(
+        let mut files = parse_changed_files(&self.run_show(
             "file list",
             &[
                 "show".into(),
@@ -635,6 +660,27 @@ impl HistorySource for GitHistory {
                 id.into(),
             ],
         )?)?;
+        let raw_files = parse_changed_files(&self.run_show(
+            "raw file list",
+            &[
+                "show".into(),
+                "--name-status".into(),
+                "--format=".into(),
+                "--no-color".into(),
+                "-z".into(),
+                id.into(),
+            ],
+        )?)?;
+        if files.len() != raw_files.len() {
+            return Err(GitError::Show {
+                stage: "file list".into(),
+                reason: "display and raw file lists have different lengths".into(),
+            });
+        }
+        for (file, raw) in files.iter_mut().zip(raw_files) {
+            file.old_path = raw.old_path;
+            file.new_path = raw.new_path;
+        }
 
         let diff = self.presentation(
             self.run_show("diff", &command_with_commit(&self.show_command, id))?,
@@ -835,6 +881,9 @@ fn literal_path(path: &[u8]) -> OsString {
 }
 
 fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
+    if output.contains(&0) {
+        return parse_changed_files_z(output);
+    }
     output_lines(output)
         .into_iter()
         .map(|line| {
@@ -855,7 +904,7 @@ fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
             }
             let status = safe_text(status, false);
             let display = safe_text(&line.replace('\t', " "), true);
-            let path = |value: &str| sanitized_git_path(value);
+            let path = |value: &str| PathBuf::from(sanitized_git_path(value));
             let (old_path, new_path) = if status.starts_with(['R', 'C']) {
                 if paths.len() != 2 {
                     return Err(GitError::Show {
@@ -880,6 +929,71 @@ fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
         .collect()
 }
 
+fn parse_changed_files_z(output: &[u8]) -> Result<Vec<ChangedFile>, GitError> {
+    let mut entries = output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    let mut files = Vec::new();
+    while let Some(status) = entries.next() {
+        let status_text = String::from_utf8_lossy(status);
+        let Some(first_path) = entries.next() else {
+            return Err(GitError::Show {
+                stage: "file list".into(),
+                reason: format!("invalid name-status row `{status_text}`"),
+            });
+        };
+        let rename = status
+            .first()
+            .is_some_and(|byte| matches!(byte, b'R' | b'C'));
+        let second_path = if rename {
+            Some(entries.next().ok_or_else(|| GitError::Show {
+                stage: "file list".into(),
+                reason: format!("invalid name-status row `{status_text}`"),
+            })?)
+        } else {
+            None
+        };
+        let (old_path, new_path) = if rename {
+            (
+                Some(first_path.to_vec()),
+                second_path.map(|path| path.to_vec()),
+            )
+        } else if status.starts_with(b"D") {
+            (Some(first_path.to_vec()), None)
+        } else if status.starts_with(b"A") {
+            (None, Some(first_path.to_vec()))
+        } else {
+            (Some(first_path.to_vec()), Some(first_path.to_vec()))
+        };
+        let display = match (&old_path, &new_path) {
+            (Some(old), Some(new)) if old != new => format!(
+                "{} {} {}",
+                safe_text(&status_text, false),
+                display_raw_path(old),
+                display_raw_path(new)
+            ),
+            (Some(path), _) | (_, Some(path)) => format!(
+                "{} {}",
+                safe_text(&status_text, false),
+                display_raw_path(path)
+            ),
+            (None, None) => safe_text(&status_text, false),
+        };
+        let old_path = old_path
+            .as_deref()
+            .map(|path| PathBuf::from(os_string_from_bytes(path)));
+        let new_path = new_path
+            .as_deref()
+            .map(|path| PathBuf::from(os_string_from_bytes(path)));
+        files.push(ChangedFile {
+            display,
+            old_path,
+            new_path,
+        });
+    }
+    Ok(files)
+}
+
 /// Return the first Git or delta file header that belongs to `file`.
 pub fn patch_offset(lines: &[String], file: &ChangedFile) -> Option<usize> {
     PatchIndex::for_changed_files(lines, std::slice::from_ref(file)).offset_for(0)
@@ -889,11 +1003,11 @@ fn diff_header_matches_file(file: &ChangedFile, old_path: &str, new_path: &str) 
     let matches_old = file
         .old_path
         .as_deref()
-        .is_some_and(|path| diff_header_matches_path(old_path, path));
+        .is_some_and(|path| diff_header_matches_path(old_path, &display_path(path)));
     let matches_new = file
         .new_path
         .as_deref()
-        .is_some_and(|path| diff_header_matches_path(new_path, path));
+        .is_some_and(|path| diff_header_matches_path(new_path, &display_path(path)));
     match (file.old_path.as_deref(), file.new_path.as_deref()) {
         (Some(_), Some(_)) => matches_old && matches_new,
         (Some(_), None) => matches_old,
@@ -906,14 +1020,14 @@ fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
     match (file.old_path.as_deref(), file.new_path.as_deref()) {
         (Some(old), Some(new)) if old != new => {
             header.strip_prefix("renamed: ").is_some_and(|paths| {
-                paths
-                    .split_once('⟶')
-                    .is_some_and(|(left, right)| left.trim() == old && right.trim() == new)
+                paths.split_once('⟶').is_some_and(|(left, right)| {
+                    left.trim() == display_path(old) && right.trim() == display_path(new)
+                })
             })
         }
-        (None, Some(new)) => header == format!("added: {new}"),
-        (Some(old), None) => header == format!("removed: {old}"),
-        (Some(old), Some(new)) => old == new && header == new,
+        (None, Some(new)) => header == format!("added: {}", display_path(new)),
+        (Some(old), None) => header == format!("removed: {}", display_path(old)),
+        (Some(old), Some(new)) => old == new && header == display_path(new),
         (None, None) => false,
     }
 }
@@ -937,6 +1051,50 @@ pub fn file_at_patch_offset(
     offset: usize,
 ) -> Option<usize> {
     PatchIndex::for_changed_files(lines, files).file_at(offset)
+}
+
+/// Return the new-file line represented by a visible unified-diff row.
+///
+/// Hunk headers map to their first new-file line. Context and added rows map to
+/// the current new-file line; removed and non-hunk rows have no worktree line.
+pub fn diff_line_number(lines: &[String], offset: usize) -> Option<usize> {
+    let mut new_line = None;
+    for (index, raw_line) in lines.iter().enumerate().take(offset.saturating_add(1)) {
+        let line = safe_text(raw_line, false);
+        if line.starts_with("diff --git ") {
+            new_line = None;
+            continue;
+        }
+        if let Some(start) = hunk_new_start(&line) {
+            new_line = Some(start);
+            if index == offset {
+                return new_line;
+            }
+            continue;
+        }
+        let represented = match line.as_bytes().first() {
+            Some(b'+') | Some(b' ') => new_line,
+            _ => None,
+        };
+        if index == offset {
+            return represented;
+        }
+        if represented.is_some() {
+            new_line = new_line.map(|line| line.saturating_add(1));
+        }
+    }
+    None
+}
+
+fn hunk_new_start(line: &str) -> Option<usize> {
+    let range = line.strip_prefix("@@ ")?.split_whitespace().nth(1)?;
+    range
+        .strip_prefix('+')?
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()
+        .map(|line| line.max(1))
 }
 
 fn diff_header_paths(input: &str) -> Vec<(String, String)> {
@@ -977,6 +1135,10 @@ fn diff_header_matches_path(header: &str, path: &str) -> bool {
         || header == format!("a/{path}")
         || header == format!("b/{path}")
         || header.ends_with(&format!("/{path}"))
+}
+
+fn display_path(path: &Path) -> String {
+    safe_text(&path.to_string_lossy(), false)
 }
 
 fn git_path_tokens(input: &str) -> impl Iterator<Item = String> + '_ {
@@ -1381,16 +1543,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(files[0].display, "M modified.rs");
-        assert_eq!(files[0].old_path.as_deref(), Some("modified.rs"));
-        assert_eq!(files[0].new_path.as_deref(), Some("modified.rs"));
+        assert_eq!(files[0].old_path.as_deref(), Some(Path::new("modified.rs")));
+        assert_eq!(files[0].new_path.as_deref(), Some(Path::new("modified.rs")));
         assert_eq!(files[1].old_path, None);
-        assert_eq!(files[1].new_path.as_deref(), Some("added.rs"));
-        assert_eq!(files[2].old_path.as_deref(), Some("deleted.rs"));
+        assert_eq!(files[1].new_path.as_deref(), Some(Path::new("added.rs")));
+        assert_eq!(files[2].old_path.as_deref(), Some(Path::new("deleted.rs")));
         assert_eq!(files[2].new_path, None);
-        assert_eq!(files[3].old_path.as_deref(), Some("old.rs"));
-        assert_eq!(files[3].new_path.as_deref(), Some("new.rs"));
-        assert_eq!(files[4].old_path.as_deref(), Some("source.rs"));
-        assert_eq!(files[4].new_path.as_deref(), Some("copy.rs"));
+        assert_eq!(files[3].old_path.as_deref(), Some(Path::new("old.rs")));
+        assert_eq!(files[3].new_path.as_deref(), Some(Path::new("new.rs")));
+        assert_eq!(files[4].old_path.as_deref(), Some(Path::new("source.rs")));
+        assert_eq!(files[4].new_path.as_deref(), Some(Path::new("copy.rs")));
+    }
+
+    #[test]
+    fn nul_name_status_preserves_raw_paths_for_editor_targets() {
+        let files = parse_changed_files(b"M\0non-utf8-\xff.rs\0").unwrap();
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStrExt;
+        #[cfg(unix)]
+        assert_eq!(
+            files[0].new_path.as_deref().unwrap().as_os_str().as_bytes(),
+            b"non-utf8-\xff.rs"
+        );
+        assert!(files[0].display.contains('�'));
     }
 
     #[test]
@@ -1404,6 +1579,24 @@ mod tests {
         ];
         assert_eq!(patch_offset(&diff, &files[0]), Some(0));
         assert_eq!(patch_offset(&diff, &files[1]), Some(2));
+    }
+
+    #[test]
+    fn diff_rows_map_to_new_file_lines_when_available() {
+        let diff = [
+            "diff --git a/file b/file".into(),
+            "@@ -10,2 +20,3 @@ fn example()".into(),
+            " context".into(),
+            "+added".into(),
+            "-removed".into(),
+            "\\ No newline at end of file".into(),
+        ];
+        assert_eq!(diff_line_number(&diff, 0), None);
+        assert_eq!(diff_line_number(&diff, 1), Some(20));
+        assert_eq!(diff_line_number(&diff, 2), Some(20));
+        assert_eq!(diff_line_number(&diff, 3), Some(21));
+        assert_eq!(diff_line_number(&diff, 4), None);
+        assert_eq!(diff_line_number(&diff, 5), None);
     }
 
     #[test]
@@ -1432,10 +1625,10 @@ mod tests {
 
         assert_eq!(
             files[0].old_path.as_deref(),
-            Some("dir with space/file name.rs")
+            Some(Path::new("dir with space/file name.rs"))
         );
-        assert_eq!(files[1].old_path.as_deref(), Some("a-é.txt"));
-        assert_eq!(files[2].old_path.as_deref(), Some("a�name.txt"));
+        assert_eq!(files[1].old_path.as_deref(), Some(Path::new("a-é.txt")));
+        assert_eq!(files[2].old_path.as_deref(), Some(Path::new("a�name.txt")));
         assert_eq!(patch_offset(&diff, &files[0]), Some(0));
         assert_eq!(patch_offset(&diff, &files[1]), Some(1));
         assert_eq!(patch_offset(&diff, &files[2]), Some(2));

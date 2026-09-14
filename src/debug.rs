@@ -47,6 +47,15 @@ pub fn snapshot(app: &App) -> String {
     writeln!(output, "screen={screen}").unwrap();
     let log = app.log_state();
     writeln!(output, "running={}", app.is_running()).unwrap();
+    if let Some(request) = app.editor_request() {
+        writeln!(output, "editor.directory={}", request.directory().display()).unwrap();
+        let command = request
+            .command()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        writeln!(output, "editor.command={command:?}").unwrap();
+    }
     writeln!(output, "loaded={}", log.records().len()).unwrap();
     writeln!(output, "selected={}", log.selected()).unwrap();
     writeln!(output, "preview.visible={}", log.preview_visible()).unwrap();

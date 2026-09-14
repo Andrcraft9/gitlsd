@@ -743,6 +743,20 @@ fn show_opens_full_screen_with_metadata_files_and_all_diff() {
 }
 
 #[test]
+fn configured_editor_request_uses_selected_show_file_and_repository_root() {
+    let output = stdout(run(
+        "d;e",
+        "set editor = code -g --goto file:line\nbind e open-editor",
+    ));
+    assert!(
+        output.contains(&format!("editor.directory={}", fixture().display())),
+        "{output}"
+    );
+    assert!(output.contains("editor.command=[\"code\", \"-g\", \"--goto\""));
+    assert!(output.contains(":1\"]"), "{output}");
+}
+
+#[test]
 fn show_uses_custom_commands_for_non_head_selection_but_fixed_file_list() {
     let output = stdout(run(
         "down;d",
