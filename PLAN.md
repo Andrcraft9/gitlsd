@@ -16,7 +16,7 @@ Done:
 ## Planned: improvements
 (L) - large; (M) - medium; (S) - small.
 
-- [ ] (S) Don't print "Loaded commits N".
+- [x] (S) Don't print "Loaded commits N".
 - [ ] (S) Preview/show: add new keys to adjust context size, e.g. `[` and `]` defaults like in `tig`.
 - [ ] (S) Don't show "Focus the show diff to search". Always search through diff.
 - [ ] (M) Simplify case_insensitive_match_ranges() and possibly other places assuming that we only support Latin alphabet.

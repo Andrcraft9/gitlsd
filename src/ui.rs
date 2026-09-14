@@ -1148,7 +1148,7 @@ mod tests {
         assert!(text.contains("gitlsd log"));
         assert!(text.contains("abc1234 2026-09-05 Author"));
         assert!(text.contains("Rendered subject"));
-        assert!(text.contains("Loaded 1 commits"));
+        assert!(!text.contains("Loaded"));
         assert!(
             terminal
                 .backend()

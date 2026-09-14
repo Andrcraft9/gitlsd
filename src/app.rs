@@ -485,8 +485,6 @@ impl App {
         self.reload_preview(source);
         if self.log.records.is_empty() {
             self.status = "No commits found".into();
-        } else if self.status.is_empty() {
-            self.status = format!("Loaded {} commits", self.log.records.len());
         }
         Ok(())
     }
