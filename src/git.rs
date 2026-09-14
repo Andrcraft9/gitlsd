@@ -165,9 +165,9 @@ impl PatchIndex {
                     })
                     .collect::<Vec<_>>()
             } else {
-                let next_is_delta_rule = plain.get(line_index + 1).is_some_and(|next| {
-                    !next.is_empty() && next.chars().all(|character| character == '─')
-                });
+                let next_is_delta_rule = plain
+                    .get(line_index + 1)
+                    .is_some_and(|next| is_delta_decoration_rule(next));
                 if next_is_delta_rule {
                     matching_file_indices(files, &file_lookup, &delta_header_paths(line), |file| {
                         delta_header_matches_file(line, file)
@@ -229,6 +229,7 @@ fn path_variants(path: &str) -> impl Iterator<Item = &str> {
 }
 
 fn delta_header_paths(header: &str) -> Vec<&str> {
+    let header = delta_header_text(header);
     if let Some(paths) = header.strip_prefix("renamed: ") {
         return paths
             .split_once('⟶')
@@ -242,6 +243,19 @@ fn delta_header_paths(header: &str) -> Vec<&str> {
         return vec![path];
     }
     vec![header]
+}
+
+fn delta_header_text(header: &str) -> &str {
+    let header = header.trim();
+    header.strip_suffix('│').unwrap_or(header).trim()
+}
+
+fn is_delta_decoration_rule(line: &str) -> bool {
+    let line = line.trim();
+    line.contains(['─', '━'])
+        && line
+            .chars()
+            .all(|character| matches!(character, '─' | '━' | '┐' | '┘' | '┤' | '╮' | '╯'))
 }
 
 pub trait HistorySource {
@@ -1017,6 +1031,7 @@ fn diff_header_matches_file(file: &ChangedFile, old_path: &str, new_path: &str) 
 }
 
 fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
+    let header = delta_header_text(header);
     match (file.old_path.as_deref(), file.new_path.as_deref()) {
         (Some(old), Some(new)) if old != new => {
             header.strip_prefix("renamed: ").is_some_and(|paths| {
@@ -1025,11 +1040,28 @@ fn delta_header_matches_file(header: &str, file: &ChangedFile) -> bool {
                 })
             })
         }
-        (None, Some(new)) => header == format!("added: {}", display_path(new)),
-        (Some(old), None) => header == format!("removed: {}", display_path(old)),
-        (Some(old), Some(new)) => old == new && header == display_path(new),
+        (None, Some(new)) => delta_header_matches_path(header, &display_path(new)),
+        (Some(old), None) => delta_header_matches_path(header, &display_path(old)),
+        (Some(old), Some(new)) => {
+            old == new && delta_header_matches_path(header, &display_path(new))
+        }
         (None, None) => false,
     }
+}
+
+fn delta_header_matches_path(header: &str, path: &str) -> bool {
+    header == path
+        || header
+            .strip_suffix(path)
+            .is_some_and(|label| label.ends_with(char::is_whitespace))
+        || header.strip_prefix(path).is_some_and(|label| {
+            !label.is_empty()
+                && label.chars().all(|character| {
+                    character.is_whitespace()
+                        || (!character.is_alphanumeric()
+                            && !matches!(character, '/' | '\\' | '.' | '_' | '-'))
+                })
+        })
 }
 
 pub fn status_patch_offset(lines: &[String], file: &StatusFile) -> Option<usize> {
@@ -1709,6 +1741,24 @@ mod tests {
         assert_eq!(index.file_at(3), Some(1));
         assert_eq!(index.file_at(5), Some(2));
         assert_eq!(index.file_at(7), Some(3));
+    }
+
+    #[test]
+    fn patch_offsets_match_labeled_and_boxed_delta_file_headers() {
+        let files =
+            parse_changed_files(b"M\tmodified.txt\nA\tadded.txt\nD\tdeleted.txt\n").unwrap();
+        let diff = vec![
+            "▲ modified.txt".into(),
+            "────".into(),
+            "added: added.txt │".into(),
+            "────┘".into(),
+            "deleted.txt ▲".into(),
+            "━━━━".into(),
+        ];
+
+        assert_eq!(patch_offset(&diff, &files[0]), Some(0));
+        assert_eq!(patch_offset(&diff, &files[1]), Some(2));
+        assert_eq!(patch_offset(&diff, &files[2]), Some(4));
     }
 
     #[test]
