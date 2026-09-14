@@ -1061,6 +1061,15 @@ pub fn diff_line_number(lines: &[String], offset: usize) -> Option<usize> {
     let mut new_line = None;
     for (index, raw_line) in lines.iter().enumerate().take(offset.saturating_add(1)) {
         let line = safe_text(raw_line, false);
+        if let Some(line_number) = delta_new_line_number(&line) {
+            if index == offset {
+                return line_number;
+            }
+            if let Some(line_number) = line_number {
+                new_line = Some(line_number.saturating_add(1));
+            }
+            continue;
+        }
         if line.starts_with("diff --git ") {
             new_line = None;
             continue;
@@ -1084,6 +1093,23 @@ pub fn diff_line_number(lines: &[String], offset: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Read the new-side line number emitted by delta's `--line-numbers` layout.
+/// The outer option identifies a delta row; the inner option is absent for a
+/// deletion, which has no corresponding worktree line.
+fn delta_new_line_number(line: &str) -> Option<Option<usize>> {
+    let prefix = line.split_once('│')?.0;
+    if let Some((_, new_side)) = prefix.rsplit_once('⋮') {
+        return Some(new_side.trim().parse().ok());
+    }
+    prefix
+        .trim()
+        .strip_suffix(':')?
+        .trim()
+        .parse()
+        .ok()
+        .map(Some)
 }
 
 fn hunk_new_start(line: &str) -> Option<usize> {
@@ -1597,6 +1623,23 @@ mod tests {
         assert_eq!(diff_line_number(&diff, 3), Some(21));
         assert_eq!(diff_line_number(&diff, 4), None);
         assert_eq!(diff_line_number(&diff, 5), None);
+    }
+
+    #[test]
+    fn delta_line_number_rows_map_to_new_file_lines() {
+        let diff = [
+            "src/file.rs".into(),
+            "──────────".into(),
+            "12: │".into(),
+            " 11 ⋮ 12 │context".into(),
+            " 12 ⋮    │removed".into(),
+            "    ⋮ 13 │added".into(),
+        ];
+        assert_eq!(diff_line_number(&diff, 0), None);
+        assert_eq!(diff_line_number(&diff, 2), Some(12));
+        assert_eq!(diff_line_number(&diff, 3), Some(12));
+        assert_eq!(diff_line_number(&diff, 4), None);
+        assert_eq!(diff_line_number(&diff, 5), Some(13));
     }
 
     #[test]

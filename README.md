@@ -47,7 +47,7 @@ set preview = git show --stat --patch
 set show-commit = git show --no-patch
 set show = git show --patch --format=
 set status-diff = git diff --color=always
-set diff-filter = delta --paging never
+set diff-filter = delta --paging never --line-numbers
 set editor = micro +line file
 bind j move-down
 bind x quit
@@ -64,7 +64,7 @@ bind semicolon command
 
 The `open-editor` action works in the show and status file explorers and diff panes. Diff panes open at the worktree line represented by the top visible diff row; rows without a source-line mapping and explorer selections open at line 1. Deleted files cannot be opened because they are absent from the worktree.
 
-The example filter requires `delta` on PATH; delta is only needed when configured. Filters receive Git bytes on stdin and supply displayed text on stdout, using the same argument quoting as other commands. A launch failure or unsuccessful exit reports an error for the affected view without fallback. Empty diffs skip the filter. Safe ANSI colors are preserved; other terminal escape sequences are removed, and debug output remains plain text. File jumps recognize Git patch headers and delta's standard file headers. Other custom filters must preserve `diff --git` headers for file jumps and selection synchronization. `--paging never` disables delta's pager.
+The example filter requires `delta` on PATH; delta is only needed when configured. Filters receive Git bytes on stdin and supply displayed text on stdout, using the same argument quoting as other commands. A launch failure or unsuccessful exit reports an error for the affected view without fallback. Empty diffs skip the filter. Safe ANSI colors are preserved; other terminal escape sequences are removed, and debug output remains plain text. File jumps recognize Git patch headers and delta's standard file headers. Delta's `--line-numbers` output also preserves editor line jumps from diff panes. Other custom filters must preserve `diff --git` headers for file jumps and selection synchronization. `--paging never` disables delta's pager.
 
 Git, filter, and editor commands run directly without a shell. Git runs without an external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
 
