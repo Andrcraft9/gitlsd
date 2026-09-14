@@ -344,7 +344,7 @@ fn render_show(
         .metadata()
         .len()
         .saturating_add(2)
-        .min(usize::from(explorer.height.saturating_sub(1)))
+        .min(usize::from(explorer.height / 2))
         .try_into()
         .unwrap_or(u16::MAX);
     let explorer_chunks = Layout::default()
@@ -1674,6 +1674,44 @@ mod tests {
         let show = app.screen().show().unwrap();
         assert_eq!(show.focus(), ShowFocus::Explorer);
         assert!(!show.diff_fullscreen());
+    }
+
+    #[test]
+    fn long_show_metadata_does_not_hide_file_explorer() {
+        let mut show = show_data();
+        show.metadata = (0..20)
+            .map(|index| format!("commit metadata line {index}"))
+            .collect();
+        let (mut app, mut history) = app_with_history(
+            vec![CommitRecord {
+                id: "full-id".into(),
+                display: "commit".into(),
+            }],
+            Vec::new(),
+            show,
+        );
+        app.dispatch(Action::Show(ShowAction::Open), &mut history);
+
+        let mut log_state = ListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &mut log_state))
+            .unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("commit metadata line 0"));
+        assert!(!text.contains("commit metadata line 2"));
+        assert!(text.contains("src/lib.rs"));
+        assert!(
+            (0..40).any(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, 5))
+                    .is_some_and(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
+            }),
+            "selected file row should remain visible"
+        );
     }
 
     #[test]
