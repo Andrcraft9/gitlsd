@@ -195,6 +195,25 @@ fn run(script: &str, config: &str) -> Output {
         .unwrap()
 }
 
+fn run_branch(branch: &str, script: &str, config: &str) -> Output {
+    let script = if script.is_empty() {
+        "p".to_owned()
+    } else {
+        format!("p;{script}")
+    };
+    command()
+        .arg(branch)
+        .args([
+            "--config",
+            config_file(config).to_str().unwrap(),
+            "--debug",
+            &script,
+        ])
+        .current_dir(fixture())
+        .output()
+        .unwrap()
+}
+
 fn run_preview(script: &str, config: &str) -> Output {
     command()
         .args([
@@ -386,6 +405,14 @@ fn scripted_navigation_selects_expected_commit_and_prints_rows() {
     assert!(output.contains("commit=aaed0069a29bd77ca37a12f4477b41eb3fa9572f\n"));
     assert!(output.contains("rows:\n"));
     assert!(output.contains("> 1 aaed006"));
+}
+
+#[test]
+fn branch_argument_loads_commits_reachable_from_that_branch() {
+    let output = stdout(run_branch("main", "", "set batch-size 1\n"));
+    assert!(output.contains("commit=83a053085fed98911e07d443b9c9da2f590800ce\n"));
+    assert!(output.contains("Add changelog check\n"));
+    assert!(!output.contains("Fix globe draping glitch\n"));
 }
 
 #[test]

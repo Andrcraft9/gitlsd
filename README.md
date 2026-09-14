@@ -6,6 +6,16 @@
 </p>
 <br clear="left">
 
+## Usage
+
+Run `gitlsd` to browse the current history, or pass a branch to browse commits
+reachable from that branch:
+
+```console
+gitlsd
+gitlsd feature/topic
+```
+
 ## Controls
 
 | Key | Action |

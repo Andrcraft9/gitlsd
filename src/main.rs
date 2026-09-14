@@ -45,7 +45,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.show_command.clone(),
         config.status_diff_command.clone(),
         config.diff_filter.clone(),
-    );
+    )
+    .with_branch(cli.branch.as_deref());
     let mut app = App::new(config);
     app.initialize(&mut source)?;
 

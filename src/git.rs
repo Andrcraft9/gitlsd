@@ -312,6 +312,16 @@ impl GitHistory {
         }
     }
 
+    /// Scope the configured log command to commits reachable from `branch`.
+    ///
+    /// Git revisions belong before a configured `--` pathspec separator.
+    pub fn with_branch(mut self, branch: Option<&str>) -> Self {
+        if let Some(branch) = branch {
+            insert_log_revision(&mut self.command, branch);
+        }
+        self
+    }
+
     /// Write stdin while independent readers drain both output pipes.
     /// Always join the writer and reap the child, including on I/O failures.
     fn presentation(&self, input: Vec<u8>, operation: &str) -> Result<Vec<String>, GitError> {
@@ -610,6 +620,14 @@ impl GitHistory {
             })
         }
     }
+}
+
+fn insert_log_revision(command: &mut Vec<String>, revision: &str) {
+    let insertion = command
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(command.len());
+    command.insert(insertion, revision.into());
 }
 
 impl HistorySource for GitHistory {
@@ -1825,6 +1843,26 @@ mod tests {
         assert_eq!(
             command_with_commit(&command, "commit"),
             ["show", "--format=%H", "commit", "--", "src"]
+        );
+    }
+
+    #[test]
+    fn branch_is_inserted_before_configured_pathspecs() {
+        let mut command = vec!["git".into(), "log".into(), "--oneline".into()];
+        insert_log_revision(&mut command, "feature/topic");
+        assert_eq!(command, ["git", "log", "--oneline", "feature/topic"]);
+
+        let mut command = vec![
+            "git".into(),
+            "log".into(),
+            "--oneline".into(),
+            "--".into(),
+            "src".into(),
+        ];
+        insert_log_revision(&mut command, "feature/topic");
+        assert_eq!(
+            command,
+            ["git", "log", "--oneline", "feature/topic", "--", "src"]
         );
     }
 
