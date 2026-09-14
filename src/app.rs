@@ -514,7 +514,7 @@ impl App {
                 Key::Enter => {
                     let command = std::mem::take(buffer);
                     self.input = InputMode::Normal;
-                    self.submit_command(&command);
+                    self.submit_command(&command, source);
                 }
                 Key::Escape => self.input = InputMode::Normal,
                 Key::Backspace => {
@@ -1845,18 +1845,56 @@ impl App {
         }
     }
 
-    fn submit_command(&mut self, command: &str) {
-        match command.trim() {
-            "help" | "h" => {
+    fn submit_command(&mut self, command: &str, source: &mut impl HistorySource) {
+        let command = command.trim();
+        let mut parts = command.split_whitespace();
+        match parts.next() {
+            Some("help" | "h") if parts.next().is_none() => {
                 self.screen = Screen::Help(HelpState::default());
                 self.status = "Showing effective configuration".into();
             }
-            "quit" | "q" => {
+            Some("quit" | "q") if parts.next().is_none() => {
                 self.running = false;
                 self.status = "Quit requested".into();
             }
-            "" => self.status = "Command is empty".into(),
-            unknown => self.status = format!("Unknown command: {unknown}"),
+            Some("goto" | "gt") => match (parts.next(), parts.next()) {
+                (Some(commit), None) => self.goto_commit(commit, source),
+                _ => self.status = "Usage: goto <commit>".into(),
+            },
+            None => self.status = "Command is empty".into(),
+            Some(_) => self.status = format!("Unknown command: {command}"),
+        }
+    }
+
+    fn goto_commit(&mut self, commit: &str, source: &mut impl HistorySource) {
+        if !matches!(self.screen, Screen::Log) {
+            self.status = "goto is only available in log mode".into();
+            return;
+        }
+
+        let matches = |record: &CommitRecord| {
+            record.id.len() >= commit.len()
+                && record.id[..commit.len()].eq_ignore_ascii_case(commit)
+        };
+        let mut found = self.log.records.iter().position(&matches);
+        while found.is_none() && self.log.has_more {
+            let previous_length = self.log.records.len();
+            if let Err(error) = self.fetch_more(source) {
+                self.status = format!("Could not find commit `{commit}`: {error}");
+                return;
+            }
+            found = self.log.records[previous_length..]
+                .iter()
+                .position(&matches)
+                .map(|index| previous_length + index);
+        }
+
+        if let Some(index) = found {
+            self.log.selected = index;
+            self.reload_preview(source);
+            self.status = format!("Jumped to commit `{commit}`");
+        } else {
+            self.status = format!("Commit not found: {commit}");
         }
     }
 
@@ -2092,7 +2130,7 @@ mod tests {
         app.submit_search("missing".into(), true, &mut history);
         assert_eq!(app.log.selected, 0);
         assert_eq!(app.status, "No match for `missing`");
-        app.submit_command("wat");
+        app.submit_command("wat", &mut history);
         assert_eq!(app.status, "Unknown command: wat");
         assert!(app.running);
     }
@@ -2105,9 +2143,74 @@ mod tests {
             horizontal_offset: 7,
         });
 
-        app.submit_command("help");
+        let mut history = FakeHistory {
+            records: records(0),
+            fail_at: None,
+        };
+        app.submit_command("help", &mut history);
 
         assert_eq!(app.screen, Screen::Help(HelpState::default()));
+    }
+
+    #[test]
+    fn goto_command_loads_and_selects_a_commit_from_later_history() {
+        let config = Config {
+            batch_size: 2,
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+        let mut history = FakeHistory {
+            records: records(6),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+
+        app.submit_command("goto id-4", &mut history);
+
+        assert_eq!(app.log.selected, 4);
+        assert_eq!(app.log.records.len(), 6);
+        assert_eq!(app.status, "Jumped to commit `id-4`");
+    }
+
+    #[test]
+    fn goto_alias_accepts_an_id_prefix() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: vec![CommitRecord {
+                id: "abcdef123456".into(),
+                display: "Subject".into(),
+            }],
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+
+        app.submit_command("gt ABCDEF", &mut history);
+
+        assert_eq!(app.log.selected, 0);
+        assert_eq!(app.status, "Jumped to commit `ABCDEF`");
+    }
+
+    #[test]
+    fn goto_reports_usage_and_preserves_selection_when_commit_is_missing() {
+        let config = Config {
+            batch_size: 2,
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+        let mut history = FakeHistory {
+            records: records(3),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.log.selected = 1;
+
+        app.submit_command("goto", &mut history);
+        assert_eq!(app.status, "Usage: goto <commit>");
+
+        app.submit_command("goto missing", &mut history);
+        assert_eq!(app.log.selected, 1);
+        assert_eq!(app.log.records.len(), 3);
+        assert_eq!(app.status, "Commit not found: missing");
     }
 
     #[test]

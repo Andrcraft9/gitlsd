@@ -426,6 +426,19 @@ fn crossing_batch_boundary_loads_additional_distinct_commits() {
 }
 
 #[test]
+fn goto_command_loads_and_selects_a_commit_from_later_history() {
+    let output = stdout(run(
+        ":;g;o;t;o;space;f;2;1;3;8;f;3;enter",
+        "set batch-size 2\n",
+    ));
+
+    assert!(output.contains("loaded=4\n"));
+    assert!(output.contains("selected=3\n"));
+    assert!(output.contains("commit=f2138f311d2a3a64a4121756ffda9cbef84c527b\n"));
+    assert!(output.contains("status=Jumped to commit `f2138f3`\n"));
+}
+
+#[test]
 fn search_repeats_without_crossing_boundaries() {
     let unloaded = stdout(run("/;C;o;r;r;e;c;t;l;y;enter", "set batch-size 2\n"));
     assert!(unloaded.contains("commit=f2138f311d2a3a64a4121756ffda9cbef84c527b\n"));
