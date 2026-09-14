@@ -8,8 +8,7 @@
 
 ## Usage
 
-Run `gitlsd` to browse the current history, or pass a branch to browse commits
-reachable from that branch:
+Run `gitlsd` to browse the current history, or pass a branch to browse commits reachable from that branch:
 
 ```console
 gitlsd
@@ -41,46 +40,30 @@ gitlsd feature/topic
 
 The focused view is indicated by a cyan border.
 
-Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and
-`:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads
-additional history batches as needed.
+Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads additional history batches as needed.
 
 ## Configuration
 
-gitlsd reads `$HOME/.config/gitlsd/config` when it exists. Use `--config PATH` to select another file.
-Use `--create-config` to write a configuration containing every default setting and
-binding at the default location. If that file already exists, gitlsd leaves it
-unchanged.
+gitlsd reads `$HOME/.config/gitlsd/config`. Use `--config PATH` to load another file, or `--create-config` to create a default one.
 
-Configuration is line-oriented. Whitespace separates arguments, quotes preserve whitespace, backslash escapes a character, and `#` starts a comment. `=` is optional.
+Each line sets an option or binds a key. `#` starts a comment, quotes preserve spaces, and `=` is optional.
 
 ```text
 set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
-set preview = git show --stat --patch
-set show-commit = git show --no-patch
-set show = git show --patch --format=
-set status-diff = git diff --color=always
-set diff-filter = delta --paging never --line-numbers
 set editor = micro +line file
 bind j move-down
 bind x quit
-bind semicolon command
 ```
 
-- `log` defines the one-line commit listing. It must start with `git log`; multiline, graph, stat, patch, notes, and signature output are rejected.
-- `batch-size` sets pagination and must be greater than zero.
-- `preview`, `show-commit`, and `show` customize commit views.
-- `status-diff` customizes status diff presentation. Status discovery and staging commands remain fixed.
-- `diff-filter` optionally filters the full preview, show diff, and staged/unstaged diffs, including untracked files. It is disabled by default; `set diff-filter =` disables it explicitly.
-- `editor` defines the editor command and must include both file and line placeholders. Standalone `file` and `line`, micro's `+line`, VS Code's `file:line`, and embedded `{file}`/`{line}` forms are supported. It defaults to `micro +line file`. To use VS Code, set `editor = code -g --goto file:line`.
-- `bind` maps a character or named key to an action. Enter and Backspace are reserved for text input.
+- `log` controls the commit list and must use a one-line `git log` format.
+- `batch-size` controls how many commits are loaded at a time.
+- `preview`, `show-commit`, `show`, and `status-diff` control Git output.
+- `diff-filter` optionally pipes displayed diffs through another command.
+- `editor` sets the editor command and must include `file` and `line`. The default is `micro +line file`; for VS Code, use `code -g --goto file:line`.
+- `bind` maps a character or named key to an action.
 
-The `open-editor` action works in the show and status file explorers and diff panes. Diff panes open at the worktree line represented by the top visible diff row; rows without a source-line mapping and explorer selections open at line 1. Deleted files cannot be opened because they are absent from the worktree.
-
-The example filter requires `delta` on PATH; delta is only needed when configured. Filters receive Git bytes on stdin and supply displayed text on stdout, using the same argument quoting as other commands. A launch failure or unsuccessful exit reports an error for the affected view without fallback. Empty diffs skip the filter. Safe ANSI colors are preserved; other terminal escape sequences are removed, and debug output remains plain text. File jumps recognize Git patch headers and delta's standard file headers. Delta's `--line-numbers` output also preserves editor line jumps from diff panes. Other custom filters must preserve `diff --git` headers for file jumps and selection synchronization. `--paging never` disables delta's pager.
-
-Git, filter, and editor commands run directly without a shell. Git runs without an external pager. Press `?` to see all effective settings and bindings. Invalid configuration reports the file, line, and reason.
+Press `?` to see the active settings and bindings. Configuration errors include the file and line number.
 
 ## Deterministic debug interface
 
