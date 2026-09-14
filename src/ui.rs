@@ -238,7 +238,7 @@ fn render_with_states(
                 })
                 .collect();
             let list = List::new(items)
-                .block(Block::default().title(" gitlsd log ").borders(Borders::ALL))
+                .block(pane_block(" gitlsd log ", !log.preview_focused()))
                 .highlight_symbol("> ")
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             log_state.select(if log.records().is_empty() {
@@ -261,15 +261,9 @@ fn render_with_states(
                     paragraph_height(panes[1]),
                 );
                 frame.render_widget(
-                    Paragraph::new(preview).scroll((0, 0)).block(
-                        Block::default()
-                            .title(if log.preview_focused() {
-                                " preview (focused) "
-                            } else {
-                                " preview "
-                            })
-                            .borders(Borders::ALL),
-                    ),
+                    Paragraph::new(preview)
+                        .scroll((0, 0))
+                        .block(pane_block(" preview ", log.preview_focused())),
                     panes[1],
                 );
             } else {
@@ -388,15 +382,7 @@ fn render_show(
     *show_state.offset_mut() = 0;
     show_state.select(selected);
     let files = List::new(files)
-        .block(
-            Block::default()
-                .title(if show.focus() == ShowFocus::Explorer {
-                    " files (focused) "
-                } else {
-                    " files "
-                })
-                .borders(Borders::ALL),
-        )
+        .block(pane_block(" files ", show.focus() == ShowFocus::Explorer))
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(files, explorer_chunks[1], show_state);
@@ -411,15 +397,9 @@ fn render_show(
         paragraph_height(panes[1]),
     );
     frame.render_widget(
-        Paragraph::new(diff).scroll((0, 0)).block(
-            Block::default()
-                .title(if show.focus() == ShowFocus::Diff {
-                    " diff (focused) "
-                } else {
-                    " diff "
-                })
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(diff)
+            .scroll((0, 0))
+            .block(pane_block(" diff ", show.focus() == ShowFocus::Diff)),
         panes[1],
     );
 }
@@ -483,19 +463,10 @@ fn render_status(
     *status_states[0].offset_mut() = 0;
     status_states[0].select(staged_selected);
     let staged = List::new(staged_items)
-        .block(
-            Block::default()
-                .title(
-                    if status.focus() == StatusFocus::Explorer
-                        && status.group() == StatusGroup::Staged
-                    {
-                        " staged (focused) "
-                    } else {
-                        " staged "
-                    },
-                )
-                .borders(Borders::ALL),
-        )
+        .block(pane_block(
+            " staged ",
+            status.focus() == StatusFocus::Explorer && status.group() == StatusGroup::Staged,
+        ))
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(staged, explorer_chunks[0], &mut status_states[0]);
@@ -523,19 +494,10 @@ fn render_status(
     *status_states[1].offset_mut() = 0;
     status_states[1].select(unstaged_selected);
     let unstaged = List::new(unstaged_items)
-        .block(
-            Block::default()
-                .title(
-                    if status.focus() == StatusFocus::Explorer
-                        && status.group() == StatusGroup::Unstaged
-                    {
-                        " unstaged (focused) "
-                    } else {
-                        " unstaged "
-                    },
-                )
-                .borders(Borders::ALL),
-        )
+        .block(pane_block(
+            " unstaged ",
+            status.focus() == StatusFocus::Explorer && status.group() == StatusGroup::Unstaged,
+        ))
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(unstaged, explorer_chunks[1], &mut status_states[1]);
@@ -554,15 +516,9 @@ fn render_status(
         paragraph_height(panes[1]),
     );
     frame.render_widget(
-        Paragraph::new(diff).scroll((0, 0)).block(
-            Block::default()
-                .title(if status.focus() == StatusFocus::Diff {
-                    " diff (focused) "
-                } else {
-                    " diff "
-                })
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(diff)
+            .scroll((0, 0))
+            .block(pane_block(" diff ", status.focus() == StatusFocus::Diff)),
         panes[1],
     );
 }
@@ -590,13 +546,20 @@ fn render_diff(
         paragraph_height(area),
     );
     frame.render_widget(
-        Paragraph::new(diff).scroll((0, 0)).block(
-            Block::default()
-                .title(" diff (focused) ")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(diff)
+            .scroll((0, 0))
+            .block(pane_block(" diff ", true)),
         area,
     );
+}
+
+fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
+    let block = Block::default().title(title).borders(Borders::ALL);
+    if focused {
+        block.border_style(Style::default().fg(Color::Cyan))
+    } else {
+        block
+    }
 }
 
 const WINDOW_OVERSCAN: usize = 2;
@@ -1553,12 +1516,14 @@ mod tests {
             assert!(text.contains("log row"));
             assert!(text.contains("preview content"));
             assert!(!text.contains("prefix-hidden"));
-            assert!(text.contains("focused"));
+            assert!(!text.contains("(focused)"));
 
             let panes = Layout::default()
                 .direction(direction)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert!(!border_has_fg(&terminal, panes[0], Color::Cyan));
+            assert!(border_has_fg(&terminal, panes[1], Color::Cyan));
             assert_eq!(
                 terminal
                     .backend()
@@ -1597,13 +1562,15 @@ mod tests {
             assert!(text.contains("commit full-id"));
             assert!(text.contains("src/lib.rs"));
             assert!(text.contains("diff --git"));
-            assert!(text.contains("files (focused)"));
+            assert!(!text.contains("(focused)"));
             assert!(!text.contains("gitlsd log"));
 
             let panes = Layout::default()
                 .direction(direction)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert!(border_has_fg(&terminal, panes[0], Color::Cyan));
+            assert!(!border_has_fg(&terminal, panes[1], Color::Cyan));
             assert_eq!(
                 terminal
                     .backend()
@@ -1632,12 +1599,13 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("files "));
-        assert!(!text.contains("files (focused)"));
-        assert!(text.contains("diff (focused)"));
+        assert!(!text.contains("(focused)"));
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(ratatui::layout::Rect::new(0, 0, 80, 9));
+        assert!(!border_has_fg(&terminal, panes[0], Color::Cyan));
+        assert!(border_has_fg(&terminal, panes[1], Color::Cyan));
         assert_eq!(
             terminal
                 .backend()
@@ -1655,10 +1623,15 @@ mod tests {
             .draw(|frame| render(frame, &app, &mut log_state))
             .unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("diff (focused)"));
+        assert!(!text.contains("(focused)"));
         assert!(text.contains("diff --git"));
         assert!(!text.contains("commit full-id"));
         assert!(!text.contains(" files "));
+        assert!(border_has_fg(
+            &terminal,
+            ratatui::layout::Rect::new(0, 0, 80, 9),
+            Color::Cyan
+        ));
         assert_eq!(
             terminal
                 .backend()
@@ -1755,11 +1728,13 @@ mod tests {
             assert!(text.contains("staged"));
             assert!(text.contains("unstaged"));
             assert!(text.contains("untracked output"));
-            assert!(text.contains("focused"));
+            assert!(!text.contains("(focused)"));
             let panes = Layout::default()
                 .direction(direction)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
+            assert!(border_has_fg(&terminal, panes[0], Color::Cyan));
+            assert!(!border_has_fg(&terminal, panes[1], Color::Cyan));
             assert_eq!(
                 terminal
                     .backend()
@@ -1778,12 +1753,14 @@ mod tests {
             .draw(|frame| render(frame, &app, &mut log_state))
             .unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("diff (focused)"));
+        assert!(!text.contains("(focused)"));
         assert!(text.contains("diff --git a/staged.rs b/staged.rs"));
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(ratatui::layout::Rect::new(0, 0, 80, 9));
+        assert!(!border_has_fg(&terminal, panes[0], Color::Cyan));
+        assert!(border_has_fg(&terminal, panes[1], Color::Cyan));
         assert_eq!(
             terminal
                 .backend()
@@ -1801,9 +1778,14 @@ mod tests {
             .draw(|frame| render(frame, &app, &mut log_state))
             .unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("diff (focused)"));
+        assert!(!text.contains("(focused)"));
         assert!(text.contains("diff --git a/staged.rs b/staged.rs"));
         assert!(!text.contains("unstaged"));
+        assert!(border_has_fg(
+            &terminal,
+            ratatui::layout::Rect::new(0, 0, 80, 9),
+            Color::Cyan
+        ));
 
         app.handle_key(Key::Char('q'), &mut history);
         let status = app.screen().status().unwrap();
@@ -1931,6 +1913,32 @@ mod tests {
                 .unwrap();
             assert_eq!(log_state.offset(), top_offset - 1);
         }
+    }
+
+    fn border_has_fg(
+        terminal: &Terminal<TestBackend>,
+        area: ratatui::layout::Rect,
+        color: Color,
+    ) -> bool {
+        let right = area.x + area.width.saturating_sub(1);
+        let bottom = area.y + area.height.saturating_sub(1);
+        (area.x..=right).any(|x| {
+            [area.y, bottom].into_iter().any(|y| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.style().fg == Some(color))
+            })
+        }) || (area.y..=bottom).any(|y| {
+            [area.x, right].into_iter().any(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.style().fg == Some(color))
+            })
+        })
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

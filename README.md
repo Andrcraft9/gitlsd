@@ -39,6 +39,8 @@ gitlsd feature/topic
 | `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
+The focused view is indicated by a cyan border.
+
 Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and
 `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads
 additional history batches as needed.
