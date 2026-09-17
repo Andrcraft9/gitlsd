@@ -598,6 +598,14 @@ impl App {
         self.running
     }
 
+    pub fn split_ratio(&self) -> (u16, u16) {
+        match self.screen() {
+            Screen::Log | Screen::Help(_) => self.config.log_split_ratio,
+            Screen::Show(_) => self.config.show_split_ratio,
+            Screen::Status(_) => self.config.status_split_ratio,
+        }
+    }
+
     pub fn help_lines(&self) -> Vec<String> {
         self.config.help_lines()
     }

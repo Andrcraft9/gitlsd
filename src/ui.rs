@@ -135,6 +135,19 @@ fn content_split_direction(content_area: ratatui::layout::Rect) -> Direction {
     }
 }
 
+// Shared by rendering and horizontal scrolling in log, show, and status modes.
+fn content_panes(area: ratatui::layout::Rect, ratio: (u16, u16)) -> [ratatui::layout::Rect; 2] {
+    let total = u32::from(ratio.0) + u32::from(ratio.1);
+    let panes = Layout::default()
+        .direction(content_split_direction(area))
+        .constraints([
+            Constraint::Ratio(u32::from(ratio.0), total),
+            Constraint::Ratio(u32::from(ratio.1), total),
+        ])
+        .split(area);
+    [panes[0], panes[1]]
+}
+
 fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -143,10 +156,7 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
     let pane = match app.screen() {
         Screen::Help(_) => chunks[0],
         Screen::Log if app.log_state().preview_visible() => {
-            let panes = Layout::default()
-                .direction(content_split_direction(chunks[0]))
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[0]);
+            let panes = content_panes(chunks[0], app.split_ratio());
             if app.log_state().preview_focused() {
                 panes[1]
             } else {
@@ -158,10 +168,7 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
             if show.diff_fullscreen() {
                 return usize::from(chunks[0].width.saturating_sub(2));
             }
-            let panes = Layout::default()
-                .direction(content_split_direction(chunks[0]))
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[0]);
+            let panes = content_panes(chunks[0], app.split_ratio());
             match show.focus() {
                 ShowFocus::Explorer => panes[0],
                 ShowFocus::Diff => panes[1],
@@ -171,10 +178,7 @@ fn active_content_width(area: ratatui::layout::Rect, app: &App) -> usize {
             if status.diff_fullscreen() {
                 return usize::from(chunks[0].width.saturating_sub(2));
             }
-            let panes = Layout::default()
-                .direction(content_split_direction(chunks[0]))
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[0]);
+            let panes = content_panes(chunks[0], app.split_ratio());
             match status.focus() {
                 StatusFocus::Explorer => panes[0],
                 StatusFocus::Diff => panes[1],
@@ -247,10 +251,7 @@ fn render_with_states(
                 Some(log.selected())
             });
             if log.preview_visible() {
-                let panes = Layout::default()
-                    .direction(content_split_direction(chunks[0]))
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(chunks[0]);
+                let panes = content_panes(chunks[0], app.split_ratio());
                 frame.render_stateful_widget(list, panes[0], log_state);
                 let preview = caches.preview.visible_lines(
                     app.log_state().preview_lines(),
@@ -287,6 +288,7 @@ fn render_with_states(
             show,
             app.show_search_query(),
             chunks[0],
+            app.split_ratio(),
             show_state,
             &mut caches.show_diff,
         ),
@@ -295,6 +297,7 @@ fn render_with_states(
             status,
             app.status_search_query(),
             chunks[0],
+            app.split_ratio(),
             status_states,
             caches,
         ),
@@ -309,6 +312,7 @@ fn render_show(
     show: &ShowState,
     search_query: Option<&str>,
     area: ratatui::layout::Rect,
+    split_ratio: (u16, u16),
     show_state: &mut ListState,
     cache: &mut DocumentCache,
 ) {
@@ -328,10 +332,7 @@ fn render_show(
         return;
     }
 
-    let panes = Layout::default()
-        .direction(content_split_direction(area))
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    let panes = content_panes(area, split_ratio);
 
     let explorer = panes[0];
     let metadata_height = show
@@ -409,6 +410,7 @@ fn render_status(
     status: &StatusState,
     search_query: Option<&str>,
     area: ratatui::layout::Rect,
+    split_ratio: (u16, u16),
     status_states: &mut [ListState; 2],
     caches: &mut RenderCaches,
 ) {
@@ -432,10 +434,7 @@ fn render_status(
         return;
     }
 
-    let panes = Layout::default()
-        .direction(content_split_direction(area))
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    let panes = content_panes(area, split_ratio);
     let explorer_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -1093,6 +1092,91 @@ mod tests {
     }
 
     #[test]
+    fn configured_ratio_controls_all_modes_and_active_widths() {
+        for mode in ["log", "show", "status"] {
+            for (width, height) in [(120, 31), (60, 61)] {
+                let (_, mut history) = app_with_history(
+                    vec![CommitRecord {
+                        id: "full-id".into(),
+                        display: "commit".into(),
+                    }],
+                    vec!["preview".into()],
+                    show_data(),
+                );
+                history.status = StatusData {
+                    unstaged: vec![StatusFile {
+                        display: " M src/lib.rs".into(),
+                        old_path: Some(b"src/lib.rs".to_vec()),
+                        new_path: Some(b"src/lib.rs".to_vec()),
+                    }],
+                    unstaged_diff: vec!["diff".into()],
+                    ..StatusData::default()
+                };
+                let config = Config::parse(
+                    &format!("set log-split-ratio = 3:1\nset show-split-ratio = 3:1\nset status-split-ratio = 3:1\nset {mode}-split-ratio = 1:2"),
+                    std::path::Path::new("ratio.conf"),
+                )
+                .unwrap();
+                let mut app = App::new(config);
+                app.initialize(&mut history).unwrap();
+                match mode {
+                    "log" => {
+                        if !app.log_state().preview_visible() {
+                            app.dispatch(Action::Preview(PreviewAction::Toggle), &mut history);
+                        }
+                    }
+                    "show" => app.dispatch(Action::Show(ShowAction::Open), &mut history),
+                    "status" => app.dispatch(Action::Status(StatusAction::Open), &mut history),
+                    _ => unreachable!(),
+                }
+                let area = ratatui::layout::Rect::new(0, 0, width, height);
+                let panes = if width == 120 {
+                    [
+                        ratatui::layout::Rect::new(0, 0, 40, 30),
+                        ratatui::layout::Rect::new(40, 0, 80, 30),
+                    ]
+                } else {
+                    [
+                        ratatui::layout::Rect::new(0, 0, 60, 20),
+                        ratatui::layout::Rect::new(0, 20, 60, 40),
+                    ]
+                };
+                assert_eq!(
+                    active_content_width(area, &app),
+                    usize::from(panes[0].width - 4),
+                    "{mode}"
+                );
+                app.handle_key(Key::Enter, &mut history);
+                assert_eq!(
+                    active_content_width(area, &app),
+                    usize::from(panes[1].width - 2),
+                    "{mode}"
+                );
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let mut log_state = ListState::default();
+                terminal
+                    .draw(|frame| render(frame, &app, &mut log_state))
+                    .unwrap();
+                assert_eq!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .cell((panes[1].x, panes[1].y))
+                        .unwrap()
+                        .symbol(),
+                    "┌",
+                    "{mode}"
+                );
+                assert!(border_has_fg(&terminal, panes[1], Color::Cyan), "{mode}");
+                if mode != "log" {
+                    app.handle_key(Key::Enter, &mut history);
+                    assert_eq!(active_content_width(area, &app), usize::from(width - 2));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn active_width_tracks_each_show_pane_and_explorer_marker() {
         let (mut app, mut history) = app_with_history(
             vec![CommitRecord {
@@ -1113,7 +1197,7 @@ mod tests {
                 .split(area)[0];
             let panes = Layout::default()
                 .direction(content_split_direction(content))
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
                 .split(content);
 
             let explorer_width = usize::from(panes[0].width.saturating_sub(2)).saturating_sub(2);
@@ -1571,7 +1655,7 @@ mod tests {
 
             let panes = Layout::default()
                 .direction(direction)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
                 .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
             assert!(border_has_fg(&terminal, panes[0], Color::Cyan));
             assert!(!border_has_fg(&terminal, panes[1], Color::Cyan));
@@ -1586,7 +1670,7 @@ mod tests {
             );
 
             let explorer = panes[0];
-            let selected_row_y = explorer.y + 5;
+            let selected_row_y = explorer.y + 4.min(explorer.height / 2) + 1;
             assert!((explorer.x..explorer.x + explorer.width).any(|x| {
                 terminal
                     .backend()
@@ -1606,7 +1690,7 @@ mod tests {
         assert!(!text.contains("(focused)"));
         let panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
             .split(ratatui::layout::Rect::new(0, 0, 80, 9));
         assert!(!border_has_fg(&terminal, panes[0], Color::Cyan));
         assert!(border_has_fg(&terminal, panes[1], Color::Cyan));
@@ -1735,7 +1819,7 @@ mod tests {
             assert!(!text.contains("(focused)"));
             let panes = Layout::default()
                 .direction(direction)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
                 .split(ratatui::layout::Rect::new(0, 0, width, height - 1));
             assert!(border_has_fg(&terminal, panes[0], Color::Cyan));
             assert!(!border_has_fg(&terminal, panes[1], Color::Cyan));
@@ -1761,7 +1845,7 @@ mod tests {
         assert!(text.contains("diff --git a/staged.rs b/staged.rs"));
         let panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
             .split(ratatui::layout::Rect::new(0, 0, 80, 9));
         assert!(!border_has_fg(&terminal, panes[0], Color::Cyan));
         assert!(border_has_fg(&terminal, panes[1], Color::Cyan));

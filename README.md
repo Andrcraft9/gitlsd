@@ -58,6 +58,9 @@ Each line sets an option or binds a key. `#` starts a comment, quotes preserve s
 ```text
 set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
+set log-split-ratio = 1:1
+set show-split-ratio = 1:2
+set status-split-ratio = 1:2
 set editor = micro +line file
 bind shift-down next-chunk
 bind shift-up previous-chunk
@@ -69,6 +72,7 @@ bind x quit
 
 - `log` controls the commit list and must use a one-line `git log` format.
 - `batch-size` controls how many commits are loaded at a time.
+- `log-split-ratio`, `show-split-ratio`, and `status-split-ratio` set the log/explorer to preview/diff pane ratio independently for each mode. Defaults are `1:1` for log and `1:2` for show and status; `1:2` gives the preview/diff twice the space. It applies left-to-right or top-to-bottom, depending on the terminal shape. Each value must be an integer from 1 to 65535.
 - `preview`, `show-commit`, `show`, and `status-diff` control Git output.
 - `diff-filter` optionally pipes displayed diffs through another command.
 - `editor` sets the editor command and must include `file` and `line`. The default is `micro +line file`; for VS Code, use `code -g --goto file:line`.

@@ -285,6 +285,9 @@ pub struct Config {
     pub diff_filter: Option<Vec<String>>,
     pub editor_command: Vec<String>,
     pub batch_size: usize,
+    pub log_split_ratio: (u16, u16),
+    pub show_split_ratio: (u16, u16),
+    pub status_split_ratio: (u16, u16),
     pub bindings: BTreeMap<Key, Action>,
     pub source: Option<PathBuf>,
 }
@@ -379,6 +382,9 @@ impl Default for Config {
             diff_filter: None,
             editor_command: vec!["micro".into(), "+line".into(), "file".into()],
             batch_size: 100,
+            log_split_ratio: (1, 1),
+            show_split_ratio: (1, 2),
+            status_split_ratio: (1, 2),
             bindings,
             source: None,
         }
@@ -514,6 +520,24 @@ impl Config {
                 validate_log(values).map_err(|reason| ConfigError::new(location, reason))?;
                 self.log_command = values.to_vec();
             }
+            "log-split-ratio" | "show-split-ratio" | "status-split-ratio" => {
+                let ratio = values.first().filter(|_| values.len() == 1)
+                    .and_then(|value| value.split_once(':'))
+                    .and_then(|(first, second)| {
+                        Some((first.parse::<u16>().ok()?, second.parse::<u16>().ok()?))
+                    })
+                    .filter(|(first, second)| *first > 0 && *second > 0)
+                    .ok_or_else(|| ConfigError::new(
+                        location,
+                        format!("`set {name}` requires two positive integers from 1 to 65535 separated by `:` (for example, 1:2)"),
+                    ))?;
+                match name.as_str() {
+                    "log-split-ratio" => self.log_split_ratio = ratio,
+                    "show-split-ratio" => self.show_split_ratio = ratio,
+                    "status-split-ratio" => self.status_split_ratio = ratio,
+                    _ => unreachable!(),
+                }
+            }
             "batch-size" => {
                 if values.len() != 1 {
                     return Err(ConfigError::new(
@@ -627,6 +651,18 @@ impl Config {
             ),
             format!("setting.batch-size={}", self.batch_size),
             format!(
+                "setting.log-split-ratio={}:{}",
+                self.log_split_ratio.0, self.log_split_ratio.1
+            ),
+            format!(
+                "setting.show-split-ratio={}:{}",
+                self.show_split_ratio.0, self.show_split_ratio.1
+            ),
+            format!(
+                "setting.status-split-ratio={}:{}",
+                self.status_split_ratio.0, self.status_split_ratio.1
+            ),
+            format!(
                 "setting.diff-filter={}",
                 self.diff_filter
                     .as_deref()
@@ -695,6 +731,18 @@ impl Config {
         let mut lines = vec![
             format!("set log = {}", format_arguments(&self.log_command)),
             format!("set batch-size = {}", self.batch_size),
+            format!(
+                "set log-split-ratio = {}:{}",
+                self.log_split_ratio.0, self.log_split_ratio.1
+            ),
+            format!(
+                "set show-split-ratio = {}:{}",
+                self.show_split_ratio.0, self.show_split_ratio.1
+            ),
+            format!(
+                "set status-split-ratio = {}:{}",
+                self.status_split_ratio.0, self.status_split_ratio.1
+            ),
             format!("set preview = {}", format_arguments(&self.preview_command)),
             format!(
                 "set show-commit = {}",
@@ -1001,6 +1049,76 @@ mod tests {
     }
 
     #[test]
+    fn split_ratios_parse_independently_round_trip_and_appear_in_help() {
+        let defaults = Config::default();
+        for setting in ["log-split-ratio", "show-split-ratio", "status-split-ratio"] {
+            for ratio in ["1:2", "3:1", "65535:65535"] {
+                let config =
+                    Config::parse(&format!("set {setting} = {ratio}"), Path::new("ratio.conf"))
+                        .unwrap();
+                let expected = ratio
+                    .split_once(':')
+                    .map(|(a, b)| (a.parse::<u16>().unwrap(), b.parse::<u16>().unwrap()))
+                    .unwrap();
+                assert_eq!(
+                    config.log_split_ratio,
+                    if setting == "log-split-ratio" {
+                        expected
+                    } else {
+                        defaults.log_split_ratio
+                    }
+                );
+                assert_eq!(
+                    config.show_split_ratio,
+                    if setting == "show-split-ratio" {
+                        expected
+                    } else {
+                        defaults.show_split_ratio
+                    }
+                );
+                assert_eq!(
+                    config.status_split_ratio,
+                    if setting == "status-split-ratio" {
+                        expected
+                    } else {
+                        defaults.status_split_ratio
+                    }
+                );
+                let parsed =
+                    Config::parse(&config.file_contents(), Path::new("roundtrip.conf")).unwrap();
+                assert_eq!(parsed.log_split_ratio, config.log_split_ratio);
+                assert_eq!(parsed.show_split_ratio, config.show_split_ratio);
+                assert_eq!(parsed.status_split_ratio, config.status_split_ratio);
+                assert!(
+                    config
+                        .help_lines()
+                        .contains(&format!("setting.{setting}={ratio}"))
+                );
+            }
+            for ratio in [
+                "",
+                "1",
+                "0:1",
+                "1:0",
+                "-1:2",
+                "1:2:3",
+                "1:2 extra",
+                "65536:1",
+                "1.5:2",
+            ] {
+                let error = Config::parse(
+                    &format!("# comment\nset {setting} = {ratio}"),
+                    Path::new("ratio.conf"),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.starts_with("ratio.conf:2:"), "{error}");
+                assert!(error.contains("two positive integers"), "{error}");
+            }
+        }
+    }
+
+    #[test]
     fn default_config_file_round_trips() {
         let default = Config::default();
         let parsed = Config::parse(&default.file_contents(), Path::new("default.conf")).unwrap();
@@ -1013,6 +1131,9 @@ mod tests {
         assert_eq!(parsed.diff_filter, default.diff_filter);
         assert_eq!(parsed.editor_command, default.editor_command);
         assert_eq!(parsed.batch_size, default.batch_size);
+        assert_eq!(parsed.log_split_ratio, (1, 1));
+        assert_eq!(parsed.show_split_ratio, (1, 2));
+        assert_eq!(parsed.status_split_ratio, (1, 2));
         assert_eq!(parsed.bindings, default.bindings);
     }
 
