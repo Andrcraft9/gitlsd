@@ -52,6 +52,7 @@ pub enum GlobalAction {
     Command,
     Help,
     OpenEditor,
+    Refresh,
     Back,
     Quit,
 }
@@ -75,7 +76,7 @@ pub enum StatusAction {
 }
 
 impl Action {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
         Self::Navigation(NavigationAction::NextChunk),
@@ -94,6 +95,7 @@ impl Action {
         Self::Global(GlobalAction::Command),
         Self::Global(GlobalAction::Help),
         Self::Global(GlobalAction::OpenEditor),
+        Self::Global(GlobalAction::Refresh),
         Self::Global(GlobalAction::Back),
         Self::Global(GlobalAction::Quit),
         Self::Preview(PreviewAction::Toggle),
@@ -151,6 +153,7 @@ impl GlobalAction {
             Self::Command => "command",
             Self::Help => "help",
             Self::OpenEditor => "open-editor",
+            Self::Refresh => "refresh",
             Self::Back => "back",
             Self::Quit => "quit",
         }
@@ -338,7 +341,8 @@ impl Default for Config {
             (Key::Char('s'), Action::Status(StatusAction::Open)),
             (Key::Tab, Action::Status(StatusAction::SwitchGroup)),
             (Key::Char('u'), Action::Status(StatusAction::ToggleStage)),
-            (Key::Char('r'), Action::Status(StatusAction::Revert)),
+            (Key::Char('r'), Action::Global(GlobalAction::Refresh)),
+            (Key::Char('R'), Action::Status(StatusAction::Revert)),
         ]
         .into_iter()
         .collect();
@@ -973,6 +977,30 @@ mod tests {
     }
 
     #[test]
+    fn refresh_and_revert_have_distinct_defaults_and_refresh_can_be_rebound() {
+        let config = Config::default();
+        assert_eq!(
+            config.action_for(&Key::Char('r')),
+            Some(Action::Global(GlobalAction::Refresh))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('R')),
+            Some(Action::Status(StatusAction::Revert))
+        );
+        let config = Config::parse("bind x refresh", Path::new("refresh.conf")).unwrap();
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::Global(GlobalAction::Refresh))
+        );
+        assert!(config.help_lines().contains(&"binding.r=refresh".into()));
+        assert!(
+            config
+                .help_lines()
+                .contains(&"binding.R=status-revert".into())
+        );
+    }
+
+    #[test]
     fn default_config_file_round_trips() {
         let default = Config::default();
         let parsed = Config::parse(&default.file_contents(), Path::new("default.conf")).unwrap();
@@ -1236,6 +1264,7 @@ mod tests {
             "command",
             "help",
             "open-editor",
+            "refresh",
             "back",
             "quit",
             "toggle-preview",

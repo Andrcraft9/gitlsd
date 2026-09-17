@@ -228,6 +228,26 @@ impl Default for StatusState {
     }
 }
 
+impl Default for LogState {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            selected: 0,
+            log_horizontal_offset: 0,
+            preview_visible: true,
+            preview_focused: false,
+            preview_lines: Vec::new(),
+            preview_offset: 0,
+            preview_horizontal_offset: 0,
+            has_more: true,
+            next_offset: 0,
+            last_search: None,
+            last_preview_search: None,
+            preview_revision: next_document_revision(),
+        }
+    }
+}
+
 impl LogState {
     pub fn records(&self) -> &[CommitRecord] {
         &self.records
@@ -450,21 +470,7 @@ impl App {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            log: LogState {
-                records: Vec::new(),
-                selected: 0,
-                log_horizontal_offset: 0,
-                preview_visible: true,
-                preview_focused: false,
-                preview_lines: Vec::new(),
-                preview_offset: 0,
-                preview_horizontal_offset: 0,
-                has_more: true,
-                next_offset: 0,
-                last_search: None,
-                last_preview_search: None,
-                preview_revision: next_document_revision(),
-            },
+            log: LogState::default(),
             screen: Screen::Log,
             input: InputMode::Normal,
             status: String::new(),
@@ -938,6 +944,7 @@ impl App {
                 self.status = "Showing effective configuration".into();
             }
             GlobalAction::OpenEditor => self.request_editor(source),
+            GlobalAction::Refresh => self.refresh(source),
             GlobalAction::Back => {
                 if self.clear_active_search() {
                     self.status.clear();
@@ -983,6 +990,30 @@ impl App {
             GlobalAction::Quit => {
                 self.running = false;
                 self.status = "Quit requested".into();
+            }
+        }
+    }
+
+    fn refresh(&mut self, source: &mut impl HistorySource) {
+        match &self.screen {
+            Screen::Log => {
+                self.log = LogState::default();
+                self.status.clear();
+                if let Err(error) = self.initialize(source) {
+                    self.status = format!("Could not refresh log: {error}");
+                }
+            }
+            Screen::Status(_) => match source.load_status() {
+                Ok(data) => {
+                    self.replace_status_data(data);
+                    self.status.clear();
+                }
+                Err(error) => self.status = format!("Could not refresh status: {error}"),
+            },
+            Screen::Show(_) => self.open_show(source),
+            Screen::Help(_) => {
+                self.screen = Screen::Help(HelpState::default());
+                self.status = "Showing effective configuration".into();
             }
         }
     }
@@ -2120,6 +2151,200 @@ mod tests {
         fn load_show(&mut self, _id: &str) -> Result<ShowData, GitError> {
             self.result.clone()
         }
+    }
+
+    #[test]
+    fn refresh_reloads_history_from_first_batch_and_resets_selection() {
+        let mut app = App::new(Config {
+            batch_size: 2,
+            ..Config::default()
+        });
+        let mut history = FakeHistory {
+            records: records(5),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        app.handle_key(Key::Down, &mut history);
+        app.handle_key(Key::Down, &mut history);
+        assert_eq!(app.log.records.len(), 4);
+        history.records.insert(
+            0,
+            CommitRecord {
+                id: "new".into(),
+                display: "New commit".into(),
+            },
+        );
+        app.log.preview_focused = true;
+        app.handle_key(Key::Char('r'), &mut history);
+        assert_eq!(app.log.records[0].id, "new");
+        assert_eq!(app.log.selected, 0);
+        assert_eq!(app.selected_record().unwrap().id, "new");
+        assert!(!app.log.preview_focused);
+        assert!(matches!(app.screen, Screen::Log));
+        assert_eq!(app.log.next_offset, 2);
+        assert_eq!(app.log.records.len(), 2);
+        app.handle_key(Key::Down, &mut history);
+        assert_eq!(app.log.records.len(), 4);
+        assert_eq!(app.log.records.last().unwrap().id, "id-2");
+
+        history.records.clear();
+        app.handle_key(Key::Char('r'), &mut history);
+        assert!(app.log.records.is_empty());
+        assert_eq!(app.log.selected, 0);
+        assert!(!app.log.has_more);
+        assert_eq!(app.status, "No commits found");
+    }
+
+    #[test]
+    fn refresh_updates_focused_preview_and_recovers_from_unborn_history() {
+        struct PreviewHistory {
+            unborn: bool,
+            text: String,
+        }
+        impl HistorySource for PreviewHistory {
+            fn load(&mut self, _: usize, _: usize) -> Result<Vec<CommitRecord>, GitError> {
+                if self.unborn {
+                    Err(GitError::Unborn)
+                } else {
+                    Ok(records(1))
+                }
+            }
+            fn load_preview(&mut self, _: &str) -> Result<Vec<String>, GitError> {
+                Ok(vec![self.text.clone()])
+            }
+        }
+        let mut history = PreviewHistory {
+            unborn: true,
+            text: "before".into(),
+        };
+        let mut app = App::new(Config::default());
+        app.initialize(&mut history).unwrap();
+        history.unborn = false;
+        app.handle_key(Key::Char('r'), &mut history);
+        assert_eq!(app.log.records.len(), 1);
+        assert_eq!(app.log.preview_lines, ["before"]);
+        app.log.preview_focused = true;
+        let revision = app.log.preview_revision;
+        history.text = "after".into();
+        app.handle_key(Key::Char('r'), &mut history);
+        assert_eq!(app.log.preview_lines, ["after"]);
+        assert_ne!(app.log.preview_revision, revision);
+        assert!(!app.log.preview_focused);
+        history.unborn = true;
+        app.handle_key(Key::Char('r'), &mut history);
+        assert!(app.log.records.is_empty());
+        assert!(app.log.preview_lines.is_empty());
+        assert_eq!(app.status, "No commits found");
+    }
+
+    #[test]
+    fn failed_log_refresh_reports_error_after_reset() {
+        let mut app = App::new(Config::default());
+        let mut history = FakeHistory {
+            records: records(3),
+            fail_at: None,
+        };
+        app.initialize(&mut history).unwrap();
+        history.fail_at = Some(0);
+        app.handle_key(Key::Char('r'), &mut history);
+        assert!(app.log.records.is_empty());
+        assert!(app.log.preview_lines.is_empty());
+        assert!(app.status.starts_with("Could not refresh log:"));
+        assert!(app.status.contains("planned failure"));
+    }
+
+    #[test]
+    fn refresh_reloads_show_and_resets_view_state() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.handle_key(Key::Char('d'), &mut history);
+        app.handle_key(Key::Down, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        let revision = app.screen.show().unwrap().show_diff_revision;
+        let mut data = show_data();
+        data.metadata.push("Updated metadata".into());
+        data.diff.push("Updated diff".into());
+        history.result = Ok(data);
+        app.handle_key(Key::Char('r'), &mut history);
+        let show = app.screen.show().unwrap();
+        assert_eq!(show.show_focus, ShowFocus::Explorer);
+        assert!(!show.show_diff_fullscreen);
+        assert_eq!(show.show_selected, Some(0));
+        assert_eq!(show.show_files[0].display, "M one.rs");
+        assert_eq!(show.show_metadata.last().unwrap(), "Updated metadata");
+        assert_eq!(show.show_diff_lines.last().unwrap(), "Updated diff");
+        assert_ne!(show.show_diff_revision, revision);
+        history.result = Err(GitError::Output("planned failure".into()));
+        app.handle_key(Key::Char('r'), &mut history);
+        assert!(matches!(app.screen, Screen::Log));
+        assert!(app.status.contains("Could not load show"));
+    }
+
+    #[test]
+    fn refresh_reloads_status_preserving_group_selection_and_fullscreen_focus() {
+        struct StatusHistory {
+            data: StatusData,
+            fail: bool,
+        }
+        impl HistorySource for StatusHistory {
+            fn load(&mut self, _: usize, _: usize) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                if self.fail {
+                    Err(GitError::Output("planned failure".into()))
+                } else {
+                    Ok(self.data.clone())
+                }
+            }
+        }
+        let file = StatusFile {
+            display: "M  one.rs".into(),
+            old_path: Some(b"one.rs".to_vec()),
+            new_path: Some(b"one.rs".to_vec()),
+        };
+        let mut history = StatusHistory {
+            data: StatusData {
+                staged: vec![file.clone()],
+                staged_diff: vec!["diff --git a/one.rs b/one.rs".into()],
+                ..StatusData::default()
+            },
+            fail: false,
+        };
+        let mut app = App::new(Config::default());
+        app.handle_key(Key::Char('s'), &mut history);
+        app.handle_key(Key::Tab, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        let revision = app.screen.status().unwrap().staged_diff_revision;
+        history.data.staged.insert(
+            0,
+            StatusFile {
+                display: "M  zero.rs".into(),
+                old_path: Some(b"zero.rs".to_vec()),
+                new_path: Some(b"zero.rs".to_vec()),
+            },
+        );
+        history.data.staged_diff.push("@@ -1 +1 @@".into());
+        history.data.staged_diff.push("+updated".into());
+        app.handle_key(Key::Char('r'), &mut history);
+        let status = app.screen.status().unwrap();
+        assert_eq!(status.active_group, StatusGroup::Staged);
+        assert_eq!(status.status_focus, StatusFocus::Diff);
+        assert!(status.status_diff_fullscreen);
+        assert_eq!(status.staged_selected, Some(1));
+        assert_eq!(status.staged_diff.last().unwrap(), "+updated");
+        assert_ne!(status.staged_diff_revision, revision);
+        let previous = app.screen.clone();
+        history.fail = true;
+        app.handle_key(Key::Char('r'), &mut history);
+        assert_eq!(app.screen, previous);
+        assert!(app.status.contains("Could not refresh status"));
     }
 
     #[test]

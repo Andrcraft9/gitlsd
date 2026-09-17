@@ -1081,7 +1081,7 @@ fn status_diff_is_configurable_but_discovery_remains_fixed() {
 fn status_reverts_unstaged_changes_from_index_and_staged_changes_from_head() {
     let directory = status_fixture();
     let path = directory.join("partial.txt");
-    let output = stdout(run_in(&directory, "s;enter;r", ""));
+    let output = stdout(run_in(&directory, "s;enter;R", ""));
     assert!(output.contains("status.focus=diff\n"));
     assert_eq!(fs::read(&path).unwrap(), b"index\n");
     assert_eq!(
@@ -1089,7 +1089,7 @@ fn status_reverts_unstaged_changes_from_index_and_staged_changes_from_head() {
         b"index\n"
     );
 
-    let output = stdout(run_in(&directory, "s;tab;r", ""));
+    let output = stdout(run_in(&directory, "s;tab;R", ""));
     assert!(!output.contains("M  partial.txt\n"));
     assert_eq!(fs::read(&path).unwrap(), b"base\n");
     assert_eq!(git_output(&directory, &["show", ":partial.txt"]), b"base\n");
@@ -1100,7 +1100,7 @@ fn status_reverts_unstaged_changes_from_index_and_staged_changes_from_head() {
 fn revert_is_status_only_and_can_be_rebound() {
     let directory = status_fixture();
     let path = directory.join("partial.txt");
-    stdout(run_in(&directory, "r;d;r", ""));
+    stdout(run_in(&directory, "R;d;R", ""));
     assert_eq!(fs::read(&path).unwrap(), b"index\nworktree\n");
     stdout(run_in(&directory, "s;x", "bind x status-revert\n"));
     assert_eq!(fs::read(&path).unwrap(), b"index\n");
@@ -1109,13 +1109,13 @@ fn revert_is_status_only_and_can_be_rebound() {
 #[test]
 fn status_reverts_renames_and_removes_untracked_files() {
     let directory = status_fixture();
-    stdout(run_in(&directory, "s;tab;down;r", ""));
+    stdout(run_in(&directory, "s;tab;down;R", ""));
     assert_eq!(
         fs::read(directory.join("rename source.txt")).unwrap(),
         b"rename\n"
     );
     assert!(!directory.join("renamed target.txt").exists());
-    stdout(run_in(&directory, "s;down;r", ""));
+    stdout(run_in(&directory, "s;down;R", ""));
     assert!(!directory.join("untracked file.txt").exists());
 }
 
@@ -1129,7 +1129,7 @@ fn status_reverts_added_files_with_and_without_head() {
         }
         fs::write(directory.join("added.txt"), "new\n").unwrap();
         git(&directory, &["add", "--", "added.txt"]);
-        stdout(run_in(&directory, "s;tab;r", ""));
+        stdout(run_in(&directory, "s;tab;R", ""));
         assert!(!directory.join("added.txt").exists());
     }
 }
