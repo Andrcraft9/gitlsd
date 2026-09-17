@@ -653,6 +653,7 @@ impl App {
 
     fn dispatch_preview_navigation(&mut self, action: NavigationAction) {
         match action {
+            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
             NavigationAction::MoveDown => {
                 self.log.preview_offset = (self.log.preview_offset + 1)
                     .min(self.log.preview_lines.len().saturating_sub(1));
@@ -677,6 +678,7 @@ impl App {
     fn dispatch_show_navigation(&mut self, action: NavigationAction, focus: ShowFocus) {
         match focus {
             ShowFocus::Explorer => match action {
+                NavigationAction::NextFile | NavigationAction::PreviousFile => {}
                 NavigationAction::MoveDown => self.move_show_down(),
                 NavigationAction::MoveUp => self.move_show_up(),
                 NavigationAction::PageDown => self.page_show_down(),
@@ -687,6 +689,17 @@ impl App {
                 | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
             ShowFocus::Diff => match action {
+                NavigationAction::NextFile | NavigationAction::PreviousFile => {
+                    let before = self.screen.show().unwrap().show_selected;
+                    if action == NavigationAction::NextFile {
+                        self.move_show_down();
+                    } else {
+                        self.move_show_up();
+                    }
+                    if self.screen.show().unwrap().show_selected != before {
+                        self.focus_show_diff();
+                    }
+                }
                 NavigationAction::MoveDown => self.move_show_diff(1, true),
                 NavigationAction::MoveUp => self.move_show_diff(1, false),
                 NavigationAction::PageDown => self.move_show_diff(10, true),
@@ -702,6 +715,7 @@ impl App {
     fn dispatch_status_navigation(&mut self, action: NavigationAction, focus: StatusFocus) {
         match focus {
             StatusFocus::Explorer => match action {
+                NavigationAction::NextFile | NavigationAction::PreviousFile => {}
                 NavigationAction::MoveDown => self.move_status_down(),
                 NavigationAction::MoveUp => self.move_status_up(),
                 NavigationAction::PageDown => self.page_status_down(),
@@ -712,6 +726,17 @@ impl App {
                 | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
             StatusFocus::Diff => match action {
+                NavigationAction::NextFile | NavigationAction::PreviousFile => {
+                    let before = self.screen.status().unwrap().selected();
+                    if action == NavigationAction::NextFile {
+                        self.move_status_down();
+                    } else {
+                        self.move_status_up();
+                    }
+                    if self.screen.status().unwrap().selected() != before {
+                        self.focus_status_diff();
+                    }
+                }
                 NavigationAction::MoveDown => self.move_status_diff(1, true),
                 NavigationAction::MoveUp => self.move_status_diff(1, false),
                 NavigationAction::PageDown => self.move_status_diff(10, true),
@@ -727,6 +752,7 @@ impl App {
     fn dispatch_help_navigation(&mut self, action: NavigationAction) {
         let last_line = self.config.help_lines().len().saturating_sub(1);
         match action {
+            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
             NavigationAction::MoveDown => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = (help.offset + 1).min(last_line);
@@ -756,6 +782,7 @@ impl App {
         source: &mut impl HistorySource,
     ) {
         match action {
+            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
             NavigationAction::MoveDown => self.move_down(source),
             NavigationAction::MoveUp => self.move_up(source),
             NavigationAction::PageDown => {

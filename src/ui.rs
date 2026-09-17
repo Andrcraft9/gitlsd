@@ -909,6 +909,8 @@ fn translate_key(event: KeyEvent) -> Option<Key> {
     }
     match event.code {
         KeyCode::Char(character) => Some(Key::Char(character)),
+        KeyCode::Up if event.modifiers == KeyModifiers::SHIFT => Some(Key::ShiftUp),
+        KeyCode::Down if event.modifiers == KeyModifiers::SHIFT => Some(Key::ShiftDown),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
         KeyCode::PageUp => Some(Key::PageUp),
@@ -1025,6 +1027,8 @@ mod tests {
             (KeyCode::Char('j'), KeyModifiers::NONE, Some(Key::Char('j'))),
             (KeyCode::Up, KeyModifiers::NONE, Some(Key::Up)),
             (KeyCode::Down, KeyModifiers::NONE, Some(Key::Down)),
+            (KeyCode::Up, KeyModifiers::SHIFT, Some(Key::ShiftUp)),
+            (KeyCode::Down, KeyModifiers::SHIFT, Some(Key::ShiftDown)),
             (KeyCode::PageUp, KeyModifiers::NONE, Some(Key::PageUp)),
             (KeyCode::PageDown, KeyModifiers::NONE, Some(Key::PageDown)),
             (KeyCode::Home, KeyModifiers::NONE, Some(Key::Home)),

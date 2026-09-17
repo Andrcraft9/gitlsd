@@ -28,6 +28,8 @@ pub enum Action {
 pub enum NavigationAction {
     MoveDown,
     MoveUp,
+    NextFile,
+    PreviousFile,
     PageDown,
     PageUp,
     ScrollStart,
@@ -70,9 +72,11 @@ pub enum StatusAction {
 }
 
 impl Action {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
+        Self::Navigation(NavigationAction::NextFile),
+        Self::Navigation(NavigationAction::PreviousFile),
         Self::Navigation(NavigationAction::PageDown),
         Self::Navigation(NavigationAction::PageUp),
         Self::Navigation(NavigationAction::ScrollStart),
@@ -111,6 +115,8 @@ impl NavigationAction {
         match self {
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
+            Self::NextFile => "next-file",
+            Self::PreviousFile => "previous-file",
             Self::PageDown => "page-down",
             Self::PageUp => "page-up",
             Self::ScrollStart => "scroll-start",
@@ -185,6 +191,8 @@ pub enum Key {
     Char(char),
     Up,
     Down,
+    ShiftUp,
+    ShiftDown,
     PageUp,
     PageDown,
     Home,
@@ -206,6 +214,8 @@ impl Key {
             Self::Char(value) => value.to_string(),
             Self::Up => "up".into(),
             Self::Down => "down".into(),
+            Self::ShiftUp => "shift-up".into(),
+            Self::ShiftDown => "shift-down".into(),
             Self::PageUp => "page-up".into(),
             Self::PageDown => "page-down".into(),
             Self::Home => "home".into(),
@@ -228,6 +238,8 @@ impl FromStr for Key {
         match value {
             "up" => Ok(Self::Up),
             "down" => Ok(Self::Down),
+            "shift-up" => Ok(Self::ShiftUp),
+            "shift-down" => Ok(Self::ShiftDown),
             "page-up" | "pgup" => Ok(Self::PageUp),
             "page-down" | "pgdn" => Ok(Self::PageDown),
             "home" => Ok(Self::Home),
@@ -275,6 +287,14 @@ impl Default for Config {
             (Key::Down, Action::Navigation(NavigationAction::MoveDown)),
             (Key::Char('k'), Action::Navigation(NavigationAction::MoveUp)),
             (Key::Up, Action::Navigation(NavigationAction::MoveUp)),
+            (
+                Key::ShiftDown,
+                Action::Navigation(NavigationAction::NextFile),
+            ),
+            (
+                Key::ShiftUp,
+                Action::Navigation(NavigationAction::PreviousFile),
+            ),
             (
                 Key::PageDown,
                 Action::Navigation(NavigationAction::PageDown),
@@ -1149,6 +1169,8 @@ mod tests {
         let names = [
             "move-down",
             "move-up",
+            "next-file",
+            "previous-file",
             "page-down",
             "page-up",
             "scroll-start",

@@ -856,6 +856,67 @@ fn focused_show_diff_expands_fullscreen_and_back_returns_to_files() {
 }
 
 #[test]
+fn shifted_arrows_navigate_files_in_focused_diffs() {
+    let show = show_fixture();
+    let status = status_fixture();
+    for (directory, open, mode, last) in [
+        (&show, "d", "show", 4),
+        (&status, "s", "status", 1),
+        (&status, "s;tab", "status", 2),
+    ] {
+        for fullscreen in [false, true] {
+            let focus = if fullscreen { "enter;enter" } else { "enter" };
+            for (keys, selection) in [
+                ("shift-down", 1),
+                ("shift-down;shift-up", 0),
+                ("shift-up", 0),
+                (
+                    "shift-down;shift-down;shift-down;shift-down;shift-down",
+                    last,
+                ),
+            ] {
+                let actual = stdout(run_in(directory, &format!("{open};{focus};{keys}"), ""));
+                let moves = "down;".repeat(selection);
+                let expected = stdout(run_in(directory, &format!("{open};{moves}{focus}"), ""));
+                for field in ["selected", "diff.offset", "explorer.offset", "group"] {
+                    let prefix = format!("{mode}.{field}=");
+                    assert_eq!(
+                        actual.lines().find(|line| line.starts_with(&prefix)),
+                        expected.lines().find(|line| line.starts_with(&prefix)),
+                        "{open};{focus};{keys}: {field}"
+                    );
+                }
+                assert!(actual.contains(&format!("{mode}.focus=diff\n")));
+                assert!(actual.contains(&format!("{mode}.diff.fullscreen={fullscreen}\n")));
+            }
+        }
+        let actual = stdout(run_in(
+            directory,
+            &format!("{open};enter;x"),
+            "bind x next-file\n",
+        ));
+        let expected = stdout(run_in(directory, &format!("{open};down;enter"), ""));
+        for field in ["selected", "diff.offset"] {
+            let prefix = format!("{mode}.{field}=");
+            assert_eq!(
+                actual.lines().find(|line| line.starts_with(&prefix)),
+                expected.lines().find(|line| line.starts_with(&prefix)),
+            );
+        }
+        assert_eq!(
+            stdout(run_in(
+                directory,
+                &format!("{open};shift-down;shift-up"),
+                ""
+            )),
+            stdout(run_in(directory, open, "")),
+        );
+    }
+    fs::remove_dir_all(show).unwrap();
+    fs::remove_dir_all(status).unwrap();
+}
+
+#[test]
 fn show_diff_scrolling_updates_the_file_explorer_selection() {
     let output = stdout(run(
         "d;enter;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down;page-down",

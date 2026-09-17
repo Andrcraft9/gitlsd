@@ -21,6 +21,7 @@ gitlsd feature/topic
 | --- | --- |
 | `j`, Down | Navigate down |
 | `k`, Up | Navigate up |
+| Shift+Down, Shift+Up | Next or previous file in the focused show or status diff |
 | Page Down, Page Up | Move down or up ten rows |
 | Right, Left | Scroll horizontally |
 | Home, End | Jump to the start or end |
@@ -52,6 +53,8 @@ Each line sets an option or binds a key. `#` starts a comment, quotes preserve s
 set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
 set editor = micro +line file
+bind shift-down next-file
+bind shift-up previous-file
 bind j move-down
 bind x quit
 ```
