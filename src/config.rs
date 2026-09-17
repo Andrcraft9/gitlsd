@@ -69,10 +69,11 @@ pub enum StatusAction {
     Open,
     SwitchGroup,
     ToggleStage,
+    Revert,
 }
 
 impl Action {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
         Self::Navigation(NavigationAction::NextFile),
@@ -96,6 +97,7 @@ impl Action {
         Self::Status(StatusAction::Open),
         Self::Status(StatusAction::SwitchGroup),
         Self::Status(StatusAction::ToggleStage),
+        Self::Status(StatusAction::Revert),
     ];
 
     pub const fn name(self) -> &'static str {
@@ -171,6 +173,7 @@ impl StatusAction {
             Self::Open => "status-mode",
             Self::SwitchGroup => "status-switch-group",
             Self::ToggleStage => "status-toggle-stage",
+            Self::Revert => "status-revert",
         }
     }
 }
@@ -321,6 +324,7 @@ impl Default for Config {
             (Key::Char('s'), Action::Status(StatusAction::Open)),
             (Key::Tab, Action::Status(StatusAction::SwitchGroup)),
             (Key::Char('u'), Action::Status(StatusAction::ToggleStage)),
+            (Key::Char('r'), Action::Status(StatusAction::Revert)),
         ]
         .into_iter()
         .collect();
@@ -1190,6 +1194,7 @@ mod tests {
             "status-mode",
             "status-switch-group",
             "status-toggle-stage",
+            "status-revert",
         ];
 
         assert_eq!(Action::ALL.len(), names.len());

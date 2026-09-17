@@ -1063,7 +1063,8 @@ impl App {
                 }
             }
             StatusAction::SwitchGroup => self.switch_status_group(),
-            StatusAction::ToggleStage => self.toggle_status_stage(source),
+            StatusAction::ToggleStage => self.mutate_status_file(source, false),
+            StatusAction::Revert => self.mutate_status_file(source, true),
         }
     }
 
@@ -1460,7 +1461,7 @@ impl App {
         status.unstaged_diff_horizontal_offset = 0;
     }
 
-    fn toggle_status_stage(&mut self, source: &mut impl HistorySource) {
+    fn mutate_status_file(&mut self, source: &mut impl HistorySource, revert: bool) {
         let Some(status) = self.screen.status() else {
             return;
         };
@@ -1491,8 +1492,18 @@ impl App {
             }
         }
         let file = self.status_files(group)[refreshed_index].clone();
-        if let Err(error) = source.toggle_stage(group == StatusGroup::Staged, &file) {
-            self.status = format!("Could not toggle stage: {error}");
+        let result = if revert {
+            source.revert_file(group == StatusGroup::Staged, &file)
+        } else {
+            source.toggle_stage(group == StatusGroup::Staged, &file)
+        };
+        if let Err(error) = result {
+            let action = if revert {
+                "revert file"
+            } else {
+                "toggle stage"
+            };
+            self.status = format!("Could not {action}: {error}");
             return;
         }
         match source.load_status() {

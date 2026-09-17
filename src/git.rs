@@ -275,6 +275,12 @@ pub trait HistorySource {
             reason: "status mutations are unavailable".into(),
         })
     }
+    fn revert_file(&mut self, _staged: bool, _file: &StatusFile) -> Result<(), GitError> {
+        Err(GitError::Status {
+            stage: "mutation".into(),
+            reason: "status mutations are unavailable".into(),
+        })
+    }
     fn repository_root(&mut self) -> Result<PathBuf, GitError> {
         current_directory()
     }
@@ -784,6 +790,30 @@ impl HistorySource for GitHistory {
         };
         arguments.extend(file.mutation_paths().map(literal_path));
         self.run_status_command(&root, &arguments, "mutation", false)?;
+        Ok(())
+    }
+
+    fn revert_file(&mut self, staged: bool, file: &StatusFile) -> Result<(), GitError> {
+        let root = self.repository_root()?;
+        let mut arguments = if file.is_untracked() {
+            vec!["clean".into(), "--force".into(), "-d".into(), "--".into()]
+        } else if staged {
+            if self.has_head(&root)? {
+                vec![
+                    "restore".into(),
+                    "--source=HEAD".into(),
+                    "--staged".into(),
+                    "--worktree".into(),
+                    "--".into(),
+                ]
+            } else {
+                vec!["rm".into(), "--force".into(), "--".into()]
+            }
+        } else {
+            vec!["restore".into(), "--worktree".into(), "--".into()]
+        };
+        arguments.extend(file.mutation_paths().map(literal_path));
+        self.run_status_command(&root, &arguments, "revert", false)?;
         Ok(())
     }
 }

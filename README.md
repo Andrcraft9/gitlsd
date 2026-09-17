@@ -35,7 +35,8 @@ gitlsd feature/topic
 | `d` | Show selected commit |
 | `s` | Toggle status |
 | Tab | Switch status group |
-| `u` | Stage or unstage file |
+| `u` | Stage or unstage file in status mode |
+| `r` | Revert selected file in status mode (unstaged from index, staged from HEAD; remove untracked files) |
 | `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
