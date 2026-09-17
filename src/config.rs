@@ -28,6 +28,8 @@ pub enum Action {
 pub enum NavigationAction {
     MoveDown,
     MoveUp,
+    NextChunk,
+    PreviousChunk,
     NextFile,
     PreviousFile,
     PageDown,
@@ -73,9 +75,11 @@ pub enum StatusAction {
 }
 
 impl Action {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::Navigation(NavigationAction::MoveDown),
         Self::Navigation(NavigationAction::MoveUp),
+        Self::Navigation(NavigationAction::NextChunk),
+        Self::Navigation(NavigationAction::PreviousChunk),
         Self::Navigation(NavigationAction::NextFile),
         Self::Navigation(NavigationAction::PreviousFile),
         Self::Navigation(NavigationAction::PageDown),
@@ -117,6 +121,8 @@ impl NavigationAction {
         match self {
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
+            Self::NextChunk => "next-chunk",
+            Self::PreviousChunk => "previous-chunk",
             Self::NextFile => "next-file",
             Self::PreviousFile => "previous-file",
             Self::PageDown => "page-down",
@@ -292,10 +298,18 @@ impl Default for Config {
             (Key::Up, Action::Navigation(NavigationAction::MoveUp)),
             (
                 Key::ShiftDown,
-                Action::Navigation(NavigationAction::NextFile),
+                Action::Navigation(NavigationAction::NextChunk),
             ),
             (
                 Key::ShiftUp,
+                Action::Navigation(NavigationAction::PreviousChunk),
+            ),
+            (
+                Key::Char('}'),
+                Action::Navigation(NavigationAction::NextFile),
+            ),
+            (
+                Key::Char('{'),
                 Action::Navigation(NavigationAction::PreviousFile),
             ),
             (
@@ -926,6 +940,39 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn chunk_defaults_and_explicit_file_overrides() {
+        let default = Config::default();
+        for (key, action) in [
+            (Key::ShiftDown, NavigationAction::NextChunk),
+            (Key::ShiftUp, NavigationAction::PreviousChunk),
+            (Key::Char('}'), NavigationAction::NextFile),
+            (Key::Char('{'), NavigationAction::PreviousFile),
+        ] {
+            assert_eq!(default.action_for(&key), Some(Action::Navigation(action)));
+        }
+        let config = Config::parse("bind shift-down next-file\nbind shift-up previous-file\nbind x next-chunk\nbind y previous-chunk\n", Path::new("chunks.conf")).unwrap();
+        assert_eq!(
+            config.action_for(&Key::ShiftDown),
+            Some(Action::Navigation(NavigationAction::NextFile))
+        );
+        assert_eq!(
+            config.action_for(&Key::ShiftUp),
+            Some(Action::Navigation(NavigationAction::PreviousFile))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('x')),
+            Some(Action::Navigation(NavigationAction::NextChunk))
+        );
+        assert_eq!(
+            config.action_for(&Key::Char('y')),
+            Some(Action::Navigation(NavigationAction::PreviousChunk))
+        );
+        let parsed = Config::parse(&config.file_contents(), Path::new("roundtrip.conf")).unwrap();
+        assert_eq!(parsed.bindings, config.bindings);
+        assert!(config.help_lines().contains(&"binding.x=next-chunk".into()));
+    }
+
+    #[test]
     fn default_config_file_round_trips() {
         let default = Config::default();
         let parsed = Config::parse(&default.file_contents(), Path::new("default.conf")).unwrap();
@@ -1173,6 +1220,8 @@ mod tests {
         let names = [
             "move-down",
             "move-up",
+            "next-chunk",
+            "previous-chunk",
             "next-file",
             "previous-file",
             "page-down",

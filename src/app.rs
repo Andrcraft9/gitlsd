@@ -1,8 +1,8 @@
 //! Application state machine and behavior.
 //!
 //! [`App`] owns persistent log state plus enum-scoped help, show, and status state,
-//! input modes, commands, shutdown intent, and loaded-diff indexes/revisions that
-//! remain independent of terminal rendering. Editor actions become requests for
+//! input modes, commands, shutdown intent, and loaded-diff file/chunk indexes and
+//! revisions that remain independent of terminal rendering. Editor actions become requests for
 //! the active frontend so terminal lifecycle stays outside the state machine.
 
 use std::collections::HashSet;
@@ -653,7 +653,10 @@ impl App {
 
     fn dispatch_preview_navigation(&mut self, action: NavigationAction) {
         match action {
-            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
+            NavigationAction::NextFile
+            | NavigationAction::PreviousFile
+            | NavigationAction::NextChunk
+            | NavigationAction::PreviousChunk => {}
             NavigationAction::MoveDown => {
                 self.log.preview_offset = (self.log.preview_offset + 1)
                     .min(self.log.preview_lines.len().saturating_sub(1));
@@ -678,7 +681,10 @@ impl App {
     fn dispatch_show_navigation(&mut self, action: NavigationAction, focus: ShowFocus) {
         match focus {
             ShowFocus::Explorer => match action {
-                NavigationAction::NextFile | NavigationAction::PreviousFile => {}
+                NavigationAction::NextFile
+                | NavigationAction::PreviousFile
+                | NavigationAction::NextChunk
+                | NavigationAction::PreviousChunk => {}
                 NavigationAction::MoveDown => self.move_show_down(),
                 NavigationAction::MoveUp => self.move_show_up(),
                 NavigationAction::PageDown => self.page_show_down(),
@@ -689,6 +695,18 @@ impl App {
                 | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
             ShowFocus::Diff => match action {
+                NavigationAction::NextChunk | NavigationAction::PreviousChunk => {
+                    let show = self.screen.show_mut().unwrap();
+                    let target = if action == NavigationAction::NextChunk {
+                        show.show_patch_index.next_chunk(show.show_diff_offset)
+                    } else {
+                        show.show_patch_index.previous_chunk(show.show_diff_offset)
+                    };
+                    if let Some(offset) = target {
+                        show.show_diff_offset = offset;
+                        self.sync_show_selection_to_diff();
+                    }
+                }
                 NavigationAction::NextFile | NavigationAction::PreviousFile => {
                     let before = self.screen.show().unwrap().show_selected;
                     if action == NavigationAction::NextFile {
@@ -715,7 +733,10 @@ impl App {
     fn dispatch_status_navigation(&mut self, action: NavigationAction, focus: StatusFocus) {
         match focus {
             StatusFocus::Explorer => match action {
-                NavigationAction::NextFile | NavigationAction::PreviousFile => {}
+                NavigationAction::NextFile
+                | NavigationAction::PreviousFile
+                | NavigationAction::NextChunk
+                | NavigationAction::PreviousChunk => {}
                 NavigationAction::MoveDown => self.move_status_down(),
                 NavigationAction::MoveUp => self.move_status_up(),
                 NavigationAction::PageDown => self.page_status_down(),
@@ -726,6 +747,25 @@ impl App {
                 | NavigationAction::ScrollEnd => self.scroll_horizontal(action),
             },
             StatusFocus::Diff => match action {
+                NavigationAction::NextChunk | NavigationAction::PreviousChunk => {
+                    let status = self.screen.status_mut().unwrap();
+                    let index = match status.active_group {
+                        StatusGroup::Staged => &status.staged_patch_index,
+                        StatusGroup::Unstaged => &status.unstaged_patch_index,
+                    };
+                    let target = if action == NavigationAction::NextChunk {
+                        index.next_chunk(status.diff_offset())
+                    } else {
+                        index.previous_chunk(status.diff_offset())
+                    };
+                    if let Some(offset) = target {
+                        match status.active_group {
+                            StatusGroup::Staged => status.staged_diff_offset = offset,
+                            StatusGroup::Unstaged => status.unstaged_diff_offset = offset,
+                        }
+                        self.sync_status_selection_to_diff();
+                    }
+                }
                 NavigationAction::NextFile | NavigationAction::PreviousFile => {
                     let before = self.screen.status().unwrap().selected();
                     if action == NavigationAction::NextFile {
@@ -752,7 +792,10 @@ impl App {
     fn dispatch_help_navigation(&mut self, action: NavigationAction) {
         let last_line = self.config.help_lines().len().saturating_sub(1);
         match action {
-            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
+            NavigationAction::NextFile
+            | NavigationAction::PreviousFile
+            | NavigationAction::NextChunk
+            | NavigationAction::PreviousChunk => {}
             NavigationAction::MoveDown => {
                 let help = self.screen.help_mut().unwrap();
                 help.offset = (help.offset + 1).min(last_line);
@@ -782,7 +825,10 @@ impl App {
         source: &mut impl HistorySource,
     ) {
         match action {
-            NavigationAction::NextFile | NavigationAction::PreviousFile => {}
+            NavigationAction::NextFile
+            | NavigationAction::PreviousFile
+            | NavigationAction::NextChunk
+            | NavigationAction::PreviousChunk => {}
             NavigationAction::MoveDown => self.move_down(source),
             NavigationAction::MoveUp => self.move_up(source),
             NavigationAction::PageDown => {

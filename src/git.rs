@@ -5,8 +5,9 @@
 //! Git-rendered rows with stable commit IDs, loading cohesive show and status
 //! data, performing whole-file status mutations, filtering diff presentation through
 //! an optional direct subprocess, and sanitizing terminal output after filtering.
-//! It also indexes recognized Git and delta patch headers independently of terminal
-//! rendering so application navigation does not rescan loaded documents.
+//! It also indexes recognized Git and delta file and chunk headers independently of terminal
+//! rendering so application navigation does not rescan loaded documents. Git header
+//! recognition and delta presentation rules live in separate helper functions.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -87,14 +88,16 @@ pub struct StatusData {
     pub unstaged_diff: Vec<String>,
 }
 
-/// Patch-header locations for one loaded diff document.
+/// File and chunk header locations for one displayed, filtered diff document.
 ///
 /// Direct file lookup retains the first matching header. Reverse lookup is sorted
 /// by source position and selects the latest header at or before an offset.
+/// Chunk lookup selects text rows strictly before or after an offset, without wrapping.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PatchIndex {
     file_to_line: Vec<Option<usize>>,
     patch_starts: Vec<(usize, usize)>,
+    chunk_starts: Vec<usize>,
 }
 
 impl PatchIndex {
@@ -133,6 +136,19 @@ impl PatchIndex {
             .map(|(_, file_index)| *file_index)
     }
 
+    pub fn next_chunk(&self, offset: usize) -> Option<usize> {
+        self.chunk_starts
+            .get(self.chunk_starts.partition_point(|row| *row <= offset))
+            .copied()
+    }
+
+    pub fn previous_chunk(&self, offset: usize) -> Option<usize> {
+        self.chunk_starts
+            .partition_point(|row| *row < offset)
+            .checked_sub(1)
+            .map(|index| self.chunk_starts[index])
+    }
+
     fn build(lines: &[String], files: &[ChangedFile]) -> Self {
         let mut file_lookup = HashMap::<String, Vec<usize>>::new();
         for (file_index, file) in files.iter().enumerate() {
@@ -150,32 +166,16 @@ impl PatchIndex {
         let mut index = Self {
             file_to_line: vec![None; files.len()],
             patch_starts: Vec::new(),
+            chunk_starts: Vec::new(),
         };
         for (line_index, line) in plain.iter().enumerate() {
-            let file_indices = if let Some(rest) = line.strip_prefix("diff --git ") {
-                diff_header_paths(rest)
-                    .into_iter()
-                    .flat_map(|(old_path, new_path)| {
-                        matching_file_indices(
-                            files,
-                            &file_lookup,
-                            &[&old_path, &new_path],
-                            |file| diff_header_matches_file(file, &old_path, &new_path),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                let next_is_delta_rule = plain
-                    .get(line_index + 1)
-                    .is_some_and(|next| is_delta_decoration_rule(next));
-                if next_is_delta_rule {
-                    matching_file_indices(files, &file_lookup, &delta_header_paths(line), |file| {
-                        delta_header_matches_file(line, file)
-                    })
-                } else {
-                    Vec::new()
-                }
-            };
+            let file_indices =
+                git_file_header_indices(line, files, &file_lookup).unwrap_or_else(|| {
+                    delta_file_header_indices(&plain, line_index, files, &file_lookup)
+                });
+            if file_indices.is_empty() && is_chunk_header(&plain, line_index) {
+                index.chunk_starts.push(line_index);
+            }
             let mut file_indices = file_indices;
             file_indices.sort_unstable();
             file_indices.dedup();
@@ -184,9 +184,142 @@ impl PatchIndex {
                 index.patch_starts.push((line_index, file_index));
             }
         }
+        index.chunk_starts.sort_unstable();
+        index.chunk_starts.dedup();
         index.patch_starts.sort_by_key(|(start, _)| *start);
         index
     }
+}
+
+// Recognize only visible header syntax; filtered output has no raw-row mapping.
+fn is_chunk_header(lines: &[String], row: usize) -> bool {
+    is_git_chunk_header(&lines[row]) || is_delta_chunk_header(lines, row)
+}
+
+fn is_delta_chunk_header(lines: &[String], row: usize) -> bool {
+    let line = &lines[row];
+    // Delta separates headers from content by a blank row or a decoration rule.
+    // Numbered content has leading padding and/or column separators, unlike headers.
+    let separated =
+        row > 0 && (lines[row - 1].is_empty() || is_delta_chunk_decoration_rule(&lines[row - 1]));
+    if !separated || line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let text = line
+        .trim_matches(|c: char| matches!(c, '│' | '┃' | '║'))
+        .trim();
+    if is_git_chunk_header(text) {
+        return true;
+    }
+    // Default delta: "123: syntax"; with file: "path:123: syntax".
+    let mut fields = text.split(':');
+    let first = fields.next().unwrap_or_default();
+    let number = if first.bytes().all(|c| c.is_ascii_digit()) && !first.is_empty() {
+        first
+    } else {
+        if first.is_empty() || first.contains(['│', '┃', '║', '⋮']) {
+            return false;
+        }
+        fields.next().unwrap_or_default()
+    };
+    !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit()) && fields.next().is_some()
+}
+
+fn is_delta_chunk_decoration_rule(line: &str) -> bool {
+    let line = line.trim();
+    line.contains(['─', '━', '═'])
+        && line.chars().all(|c| {
+            matches!(
+                c,
+                '─' | '━'
+                    | '═'
+                    | '┌'
+                    | '┏'
+                    | '┓'
+                    | '┗'
+                    | '┛'
+                    | '┣'
+                    | '┫'
+                    | '┐'
+                    | '└'
+                    | '┘'
+                    | '├'
+                    | '┤'
+                    | '╭'
+                    | '╮'
+                    | '╰'
+                    | '╯'
+                    | '╔'
+                    | '╗'
+                    | '╚'
+                    | '╝'
+            )
+        })
+}
+
+fn is_git_chunk_header(line: &str) -> bool {
+    let count = line.bytes().take_while(|c| *c == b'@').count();
+    if count < 2 {
+        return false;
+    }
+    let mut fields = line[count..].split_whitespace();
+    for _ in 0..count - 1 {
+        if !fields.next().is_some_and(|field| is_hunk_range(field, '-')) {
+            return false;
+        }
+    }
+    fields.next().is_some_and(|field| is_hunk_range(field, '+'))
+        && fields
+            .next()
+            .is_some_and(|field| field.len() == count && field.bytes().all(|c| c == b'@'))
+}
+
+fn is_hunk_range(field: &str, sign: char) -> bool {
+    let Some(range) = field.strip_prefix(sign) else {
+        return false;
+    };
+    let mut parts = range.split(',');
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit());
+    numeric(parts.next().unwrap_or_default())
+        && parts.next().is_none_or(numeric)
+        && parts.next().is_none()
+}
+
+/// A recognized Git file-header prefix owns the row, even if no paths match.
+fn git_file_header_indices(
+    line: &str,
+    files: &[ChangedFile],
+    file_lookup: &HashMap<String, Vec<usize>>,
+) -> Option<Vec<usize>> {
+    let rest = line.strip_prefix("diff --git ")?;
+    Some(
+        diff_header_paths(rest)
+            .into_iter()
+            .flat_map(|(old_path, new_path)| {
+                matching_file_indices(files, file_lookup, &[&old_path, &new_path], |file| {
+                    diff_header_matches_file(file, &old_path, &new_path)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn delta_file_header_indices(
+    lines: &[String],
+    row: usize,
+    files: &[ChangedFile],
+    file_lookup: &HashMap<String, Vec<usize>>,
+) -> Vec<usize> {
+    if !lines
+        .get(row + 1)
+        .is_some_and(|next| is_delta_decoration_rule(next))
+    {
+        return Vec::new();
+    }
+    let line = &lines[row];
+    matching_file_indices(files, file_lookup, &delta_header_paths(line), |file| {
+        delta_header_matches_file(line, file)
+    })
 }
 
 fn matching_file_indices(
@@ -1517,6 +1650,110 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn chunk_index_recognizes_visible_git_and_delta_headers() {
+        let lines = [
+            "diff --git a/foo b/foo",
+            "--- a/foo",
+            "+++ b/foo",
+            "@@ -1,2 +1,2 @@ function",
+            " context",
+            "+@@ -2 +2 @@ fake",
+            "\x1b[34m@@@ -10,2 -10,2 +10,2 @@@ combined\x1b[m",
+            "",
+            "────────────┐",
+            "20: function │",
+            "────────────┘",
+            " 20 ⋮ 20 │content",
+            "",
+            "foo:30: function",
+            "content",
+            "",
+            "40: function",
+            "content",
+            "",
+            "──────╮",
+            "50: │",
+            "──────╯",
+            "",
+            "══════╗",
+            "60: ║",
+            "══════╝",
+            "",
+            "foo",
+            "────────────────",
+            "",
+            " 70: numbered content",
+            "80 ⋮ 80 │numbered content",
+            "90│content",
+            "@@ nonsense @@",
+            "",
+            "──────┐",
+            "│@@ -100 +100 @@ raw│",
+            "──────┘",
+        ]
+        .map(str::to_owned);
+        let index = PatchIndex::for_changed_files(&lines, &[]);
+        assert_eq!(index.chunk_starts, [3, 6, 9, 13, 16, 20, 24, 36]);
+        assert_eq!(index.next_chunk(0), Some(3));
+        assert_eq!(index.next_chunk(3), Some(6));
+        assert_eq!(index.previous_chunk(4), Some(3));
+        assert_eq!(index.previous_chunk(3), None);
+        assert_eq!(index.previous_chunk(6), Some(3));
+        assert_eq!(index.next_chunk(36), None);
+        assert_eq!(index.previous_chunk(100), Some(36));
+    }
+
+    #[test]
+    fn delta_decoration_layouts_exclude_file_headers_and_content() {
+        let file = ChangedFile {
+            new_path: Some(PathBuf::from("foo:123:")),
+            ..ChangedFile::default()
+        };
+        for (above, header, below) in [
+            ("────┐", "10: syntax │", "────┘"),
+            ("━━━━┓", "10: syntax ┃", "━━━━┛"),
+            ("────", "foo:10: syntax", "────"),
+            ("", "10: syntax", "────"),
+            ("────", "10: syntax", ""),
+            ("", "10: syntax", ""),
+            ("", "@@ -10 +10 @@ raw", ""),
+        ] {
+            let lines = [
+                "",
+                "foo:123:",
+                "────",
+                "",
+                above,
+                header,
+                below,
+                "│ 10 │old:123: │ 10 │new:123:",
+                "",
+                "│ 11 │content:123:",
+            ]
+            .map(str::to_owned);
+            let index = PatchIndex::for_changed_files(&lines, std::slice::from_ref(&file));
+            assert_eq!(index.chunk_starts, [5], "{above} {header} {below}");
+        }
+    }
+
+    #[test]
+    fn diffs_without_visible_chunks_have_no_targets() {
+        for lines in [
+            vec![],
+            vec![
+                "diff --git a/foo b/foo",
+                "Binary files a/foo and b/foo differ",
+            ],
+            vec!["foo", "──────", "old", "new"],
+        ] {
+            let lines = lines.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let index = PatchIndex::for_changed_files(&lines, &[]);
+            assert_eq!(index.next_chunk(0), None);
+            assert_eq!(index.previous_chunk(100), None);
+        }
+    }
+
     #[test]
     fn filter_handles_large_bidirectional_output_without_deadlock() {
         let history = filter_history("head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; cat");

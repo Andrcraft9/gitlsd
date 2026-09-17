@@ -21,7 +21,8 @@ gitlsd feature/topic
 | --- | --- |
 | `j`, Down | Navigate down |
 | `k`, Up | Navigate up |
-| Shift+Down, Shift+Up | Next or previous file in the focused show or status diff |
+| Shift+Down, Shift+Up | Next or previous chunk in the focused show or status diff |
+| `}`, `{` | Next or previous file in the focused show or status diff |
 | Page Down, Page Up | Move down or up ten rows |
 | Right, Left | Scroll horizontally |
 | Home, End | Jump to the start or end |
@@ -40,7 +41,10 @@ gitlsd feature/topic
 | `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
-The focused view is indicated by a cyan border.
+The focused view is indicated by a cyan border. Chunk navigation jumps to visible
+hunk headers across files without wrapping, including in fullscreen diffs. Status
+navigation stays within the active staged or unstaged group. With delta, omitted
+or unrecognizable hunk headers provide no chunk targets.
 
 Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads additional history batches as needed.
 
@@ -54,8 +58,10 @@ Each line sets an option or binds a key. `#` starts a comment, quotes preserve s
 set log = git log --oneline --decorate --all --first-parent
 set batch-size = 100
 set editor = micro +line file
-bind shift-down next-file
-bind shift-up previous-file
+bind shift-down next-chunk
+bind shift-up previous-chunk
+bind } next-file
+bind { previous-file
 bind j move-down
 bind x quit
 ```

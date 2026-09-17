@@ -856,7 +856,7 @@ fn focused_show_diff_expands_fullscreen_and_back_returns_to_files() {
 }
 
 #[test]
-fn shifted_arrows_navigate_files_in_focused_diffs() {
+fn braces_navigate_files_in_focused_diffs() {
     let show = show_fixture();
     let status = status_fixture();
     for (directory, open, mode, last) in [
@@ -866,15 +866,7 @@ fn shifted_arrows_navigate_files_in_focused_diffs() {
     ] {
         for fullscreen in [false, true] {
             let focus = if fullscreen { "enter;enter" } else { "enter" };
-            for (keys, selection) in [
-                ("shift-down", 1),
-                ("shift-down;shift-up", 0),
-                ("shift-up", 0),
-                (
-                    "shift-down;shift-down;shift-down;shift-down;shift-down",
-                    last,
-                ),
-            ] {
+            for (keys, selection) in [("}", 1), ("};{", 0), ("{", 0), ("};};};};}", last)] {
                 let actual = stdout(run_in(directory, &format!("{open};{focus};{keys}"), ""));
                 let moves = "down;".repeat(selection);
                 let expected = stdout(run_in(directory, &format!("{open};{moves}{focus}"), ""));
@@ -904,11 +896,7 @@ fn shifted_arrows_navigate_files_in_focused_diffs() {
             );
         }
         assert_eq!(
-            stdout(run_in(
-                directory,
-                &format!("{open};shift-down;shift-up"),
-                ""
-            )),
+            stdout(run_in(directory, &format!("{open};}};{{"), "")),
             stdout(run_in(directory, open, "")),
         );
     }
@@ -1308,4 +1296,187 @@ fn status_mutations_use_exact_special_paths() {
             .split(|byte| *byte == 0)
             .any(|path| path == name.as_encoded_bytes())
     );
+}
+
+// Two separated chunks per file in each independently loaded diff document.
+fn chunk_fixture() -> PathBuf {
+    let directory = status_fixture();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "existing files"]);
+    for version in 0..4 {
+        for file in ["a.txt", "b.txt"] {
+            let text = (1..=40)
+                .map(|line| {
+                    if line == 2 || line == 30 {
+                        format!("version {version} line {line} {}\n", "x".repeat(120))
+                    } else {
+                        format!("line {line}\n")
+                    }
+                })
+                .collect::<String>();
+            fs::write(directory.join(file), text).unwrap();
+        }
+        if version < 3 {
+            git(&directory, &["add", "."]);
+        }
+        if version < 2 {
+            git(&directory, &["commit", "-qm", "chunks"]);
+        }
+    }
+    directory
+}
+
+fn snapshot_offset(output: &str, mode: &str) -> usize {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{mode}.diff.offset=")))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn chunk_navigation_in_show_and_both_status_groups() {
+    let directory = chunk_fixture();
+    for (open, mode) in [("d", "show"), ("s", "status"), ("s;tab", "status")] {
+        let initial = stdout(run_in(&directory, &format!("{open};enter"), ""));
+        let diff = initial.split_once(&format!("{mode}.diff:\n")).unwrap().1;
+        let headers = diff
+            .lines()
+            .enumerate()
+            .filter_map(|(row, line)| line.starts_with("  @@ ").then_some(row))
+            .collect::<Vec<_>>();
+        assert_eq!(headers.len(), 4, "{initial}");
+        for fullscreen in [false, true] {
+            let focus = if fullscreen {
+                "enter;enter;right"
+            } else {
+                "enter;right"
+            };
+            for (keys, target, selected) in [
+                ("shift-up", snapshot_offset(&initial, mode), 0),
+                ("shift-down", headers[0], 0),
+                ("shift-down;down;shift-up", headers[0], 0),
+                ("shift-down;shift-down;shift-up", headers[0], 0),
+                ("shift-down;shift-down", headers[1], 0),
+                ("shift-down;shift-down;shift-down", headers[2], 1),
+                ("shift-down;shift-down;shift-down;shift-up", headers[1], 0),
+                (
+                    "shift-down;shift-down;shift-down;shift-down;shift-down",
+                    headers[3],
+                    1,
+                ),
+            ] {
+                let output = stdout(run_in(&directory, &format!("{open};{focus};{keys}"), ""));
+                assert_eq!(
+                    snapshot_offset(&output, mode),
+                    target,
+                    "{open};{keys}: {output}"
+                );
+                assert!(
+                    output.contains(&format!("{mode}.selected={selected}\n")),
+                    "{output}"
+                );
+                assert!(output.contains(&format!("{mode}.focus=diff\n")));
+                assert!(output.contains(&format!("{mode}.diff.fullscreen={fullscreen}\n")));
+                assert!(
+                    output.contains(&format!("{mode}.diff.horizontal-offset=40\n")),
+                    "{output}"
+                );
+            }
+        }
+        let custom = stdout(run_in(
+            &directory,
+            &format!("{open};enter;x;x;y"),
+            "bind x next-chunk\nbind y previous-chunk\n",
+        ));
+        assert_eq!(snapshot_offset(&custom, mode), headers[0]);
+        assert_eq!(
+            stdout(run_in(
+                &directory,
+                &format!("{open};shift-down;shift-up"),
+                ""
+            )),
+            stdout(run_in(&directory, open, ""))
+        );
+        let omitted = "set diff-filter = sed '/@@/d'\n";
+        assert_eq!(
+            stdout(run_in(
+                &directory,
+                &format!("{open};enter;shift-down;shift-up"),
+                omitted
+            )),
+            stdout(run_in(&directory, &format!("{open};enter"), omitted))
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn refreshed_status_rebuilds_chunk_targets() {
+    let directory = chunk_fixture();
+    // Staging the first file removes its chunks from the unstaged document.
+    let output = stdout(run_in(
+        &directory,
+        "s;u;enter;shift-down;shift-down;shift-down",
+        "",
+    ));
+    let diff = output.split_once("status.diff:\n").unwrap().1;
+    let headers = diff
+        .lines()
+        .enumerate()
+        .filter_map(|(row, line)| line.starts_with("  @@ ").then_some(row))
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 2);
+    assert_eq!(snapshot_offset(&output, "status"), headers[1]);
+    assert!(output.contains("status.group=unstaged\n"));
+    assert!(output.contains("status.selected=0\n"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn chunk_actions_leave_other_panes_and_empty_documents_unchanged() {
+    for open in ["", "enter", "?"] {
+        let keys = if open.is_empty() {
+            "shift-down;shift-up".to_owned()
+        } else {
+            format!("{open};shift-down;shift-up")
+        };
+        let visible = |output: String| {
+            output
+                .lines()
+                .filter(|line| !line.contains("setting.config="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            visible(stdout(run(&keys, ""))),
+            visible(stdout(run(open, "")))
+        );
+    }
+    let directory = chunk_fixture();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "worktree"]);
+    git(&directory, &["commit", "--allow-empty", "-qm", "empty"]);
+    for open in ["d;enter", "s;enter", "s;tab;enter"] {
+        assert_eq!(
+            stdout(run_in(
+                &directory,
+                &format!("{open};shift-down;shift-up"),
+                ""
+            )),
+            stdout(run_in(&directory, open, ""))
+        );
+    }
+    fs::write(directory.join("binary.bin"), b"old\0binary").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "binary"]);
+    fs::write(directory.join("binary.bin"), b"new\0binary").unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "binary change"]);
+    assert_eq!(
+        stdout(run_in(&directory, "d;enter;shift-down;shift-up", "")),
+        stdout(run_in(&directory, "d;enter", ""))
+    );
+    fs::remove_dir_all(directory).unwrap();
 }
