@@ -3,7 +3,7 @@
 //! [`HistorySource`] is the application-facing contract. [`GitHistory`]
 //! implements it by executing configured Git commands directly, pairing
 //! Git-rendered rows with stable commit IDs, loading cohesive show and status
-//! data, performing whole-file status mutations, filtering diff presentation through
+//! data, performing file and chunk status mutations, filtering diff presentation through
 //! an optional direct subprocess, and sanitizing terminal output after filtering.
 //! It also indexes recognized Git and delta file and chunk headers independently of terminal
 //! rendering so application navigation does not rescan loaded documents. Git header
@@ -147,6 +147,21 @@ impl PatchIndex {
             .partition_point(|row| *row < offset)
             .checked_sub(1)
             .map(|index| self.chunk_starts[index])
+    }
+
+    /// The chunk containing the offset, or the first chunk below a file header.
+    pub fn selected_chunk(&self, offset: usize) -> Option<(usize, usize)> {
+        let file = self.file_at(offset)?;
+        let chunks = self
+            .chunk_starts
+            .iter()
+            .copied()
+            .filter(|row| self.file_at(*row) == Some(file))
+            .collect::<Vec<_>>();
+        let selected = chunks
+            .partition_point(|row| *row <= offset)
+            .saturating_sub(1);
+        (!chunks.is_empty()).then_some((selected, chunks.len()))
     }
 
     fn build(lines: &[String], files: &[ChangedFile]) -> Self {
@@ -412,6 +427,19 @@ pub trait HistorySource {
         Err(GitError::Status {
             stage: "mutation".into(),
             reason: "status mutations are unavailable".into(),
+        })
+    }
+    fn mutate_chunk(
+        &mut self,
+        _staged: bool,
+        _revert: bool,
+        _file: &StatusFile,
+        _chunk: usize,
+        _chunk_count: usize,
+    ) -> Result<(), GitError> {
+        Err(GitError::Status {
+            stage: "chunk mutation".into(),
+            reason: "chunk mutations are unavailable".into(),
         })
     }
     fn repository_root(&mut self) -> Result<PathBuf, GitError> {
@@ -923,6 +951,112 @@ impl HistorySource for GitHistory {
         };
         arguments.extend(file.mutation_paths().map(literal_path));
         self.run_status_command(&root, &arguments, "mutation", false)?;
+        Ok(())
+    }
+
+    fn mutate_chunk(
+        &mut self,
+        staged: bool,
+        revert: bool,
+        file: &StatusFile,
+        chunk: usize,
+        chunk_count: usize,
+    ) -> Result<(), GitError> {
+        let root = self.repository_root()?;
+        let failure = |reason: &str| GitError::Status {
+            stage: "chunk mutation".into(),
+            reason: reason.into(),
+        };
+        let mut arguments = if file.is_untracked() {
+            self.untracked_diff_arguments(
+                file.new_path
+                    .as_deref()
+                    .ok_or_else(|| failure("File path unavailable"))?,
+            )
+        } else {
+            self.status_diff_arguments(staged)
+        };
+        let insertion = arguments
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(arguments.len());
+        arguments.splice(
+            insertion..insertion,
+            ["--no-color", "--no-ext-diff", "--no-textconv"].map(OsString::from),
+        );
+        let raw = self.run_status_command(&root, &arguments, "chunk diff", file.is_untracked())?;
+        // Keep original bytes: filtered or sanitized presentation is never a patch.
+        let rows = raw
+            .split_inclusive(|byte| *byte == b'\n')
+            .collect::<Vec<_>>();
+        let plain = rows
+            .iter()
+            .map(|row| {
+                safe_text(
+                    &String::from_utf8_lossy(row.strip_suffix(b"\n").unwrap_or(row)),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let index = PatchIndex::for_status_files(&plain, std::slice::from_ref(file));
+        let start = index
+            .offset_for(0)
+            .ok_or_else(|| failure("Raw file patch unavailable"))?;
+        let end = (start + 1..rows.len())
+            .find(|row| plain[*row].starts_with("diff --git "))
+            .unwrap_or(rows.len());
+        let chunks = (start..end)
+            .filter(|row| plain[*row].starts_with("@@ ") && is_git_chunk_header(&plain[*row]))
+            .collect::<Vec<_>>();
+        if chunks.len() != chunk_count || chunk >= chunks.len() {
+            return Err(failure("Displayed chunks do not match the raw patch"));
+        }
+        let header_end = chunks[0];
+        // Renames and mode changes belong to the file, not an individual chunk.
+        if plain[start..header_end].iter().any(|row| {
+            row.starts_with("rename ") || row.starts_with("copy ") || row.starts_with("old mode ")
+        }) {
+            return Err(failure(
+                "Use the file explorer for rename, copy, or mode changes",
+            ));
+        }
+        let chunk_end = chunks.get(chunk + 1).copied().unwrap_or(end);
+        let patch = rows[start..header_end]
+            .iter()
+            .chain(rows[chunks[chunk]..chunk_end].iter())
+            .flat_map(|row| row.iter().copied())
+            .collect::<Vec<_>>();
+        let mut command = Command::new("git");
+        command.args(["apply", "--whitespace=nowarn"]);
+        if staged || !revert {
+            command.arg(if staged && revert {
+                "--index"
+            } else {
+                "--cached"
+            });
+        }
+        if staged || revert {
+            command.arg("--reverse");
+        }
+        let mut child = command
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| failure(&error.to_string()))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let writer = thread::spawn(move || stdin.write_all(&patch));
+        let output = child
+            .wait_with_output()
+            .map_err(|error| failure(&error.to_string()))?;
+        let written = writer.join().map_err(|_| failure("Patch writer failed"))?;
+        if !output.status.success() {
+            return Err(failure(
+                safe_text(&String::from_utf8_lossy(&output.stderr), false).trim(),
+            ));
+        }
+        written.map_err(|error| failure(&error.to_string()))?;
         Ok(())
     }
 

@@ -1551,6 +1551,19 @@ impl App {
             return;
         };
         let group = status.active_group;
+        let chunk = if status.status_focus == StatusFocus::Diff {
+            let index = match group {
+                StatusGroup::Staged => &status.staged_patch_index,
+                StatusGroup::Unstaged => &status.unstaged_patch_index,
+            };
+            let Some(chunk) = index.selected_chunk(status.diff_offset()) else {
+                self.status = "Selected chunk unavailable".into();
+                return;
+            };
+            Some((chunk, status.diff_lines().to_vec()))
+        } else {
+            None
+        };
         let Some(previous_file) = self.status_selected_file() else {
             return;
         };
@@ -1561,6 +1574,17 @@ impl App {
                 return;
             }
         };
+        if let Some((_, previous_diff)) = &chunk {
+            let refreshed_diff = match group {
+                StatusGroup::Staged => &data.staged_diff,
+                StatusGroup::Unstaged => &data.unstaged_diff,
+            };
+            if refreshed_diff != previous_diff {
+                self.replace_status_data(data);
+                self.status = "Selected chunk changed during refresh".into();
+                return;
+            }
+        }
         self.replace_status_data(data);
         let Some(refreshed_index) = self
             .status_files(group)
@@ -1577,13 +1601,23 @@ impl App {
             }
         }
         let file = self.status_files(group)[refreshed_index].clone();
-        let result = if revert {
+        let result = if let Some(((selected, count), _)) = &chunk {
+            source.mutate_chunk(
+                group == StatusGroup::Staged,
+                revert,
+                &file,
+                *selected,
+                *count,
+            )
+        } else if revert {
             source.revert_file(group == StatusGroup::Staged, &file)
         } else {
             source.toggle_stage(group == StatusGroup::Staged, &file)
         };
         if let Err(error) = result {
-            let action = if revert {
+            let action = if revert && chunk.is_some() {
+                "revert chunk"
+            } else if revert {
                 "revert file"
             } else {
                 "toggle stage"

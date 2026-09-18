@@ -36,16 +36,22 @@ gitlsd feature/topic
 | `d` | Show selected commit |
 | `s` | Toggle status |
 | Tab | Switch status group |
-| `u` | Stage or unstage file in status mode |
+| `u` | Stage or unstage selected chunk (diff focus) or file (explorer focus) in status mode |
 | `r` | Refresh the current view (log and show reset selection and scroll position) |
-| `R` | Revert selected file in status mode (unstaged from index, staged from HEAD; remove untracked files) |
+| `R` | Revert selected chunk (diff focus) or file (explorer focus) in status mode (unstaged from index, staged from HEAD; remove untracked files) |
 | `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
 The focused view is indicated by a cyan border. Chunk navigation jumps to visible
 hunk headers across files without wrapping, including in fullscreen diffs. Status
-navigation stays within the active staged or unstaged group. With delta, omitted
-or unrecognizable hunk headers provide no chunk targets.
+actions apply to the chunk at the top of the focused diff, or the first chunk
+below a file header. Diffs without identifiable chunks require file explorer
+focus for mutations. Renames, copies, and mode changes also require explorer
+focus. Reverting a staged chunk requires the file's worktree contents to match
+the index; otherwise Git rejects the action. Status navigation stays within the
+active staged or unstaged group. With delta, omitted or unrecognizable hunk
+headers provide no chunk targets; chunk mutations require the displayed chunk
+count to match the raw Git patch.
 
 Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads additional history batches as needed.
 

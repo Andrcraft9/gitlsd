@@ -1480,3 +1480,97 @@ fn chunk_actions_leave_other_panes_and_empty_documents_unchanged() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn status_mutates_only_the_selected_chunk() {
+    for (staged, revert) in [(false, false), (true, false), (false, true), (true, true)] {
+        for fullscreen in [false, true] {
+            let directory = chunk_fixture();
+            if staged && revert {
+                git(&directory, &["restore", "--worktree", "."]);
+            }
+            let before_worktree = fs::read(directory.join("a.txt")).unwrap();
+            let before_other = fs::read(directory.join("b.txt")).unwrap();
+            let before_other_index = git_output(&directory, &["show", ":b.txt"]);
+            let group = if staged { ";tab" } else { "" };
+            let expand = if fullscreen { ";enter" } else { "" };
+            let action = if revert { "R" } else { "u" };
+            let output = stdout(run_in(
+                &directory,
+                &format!("s{group};enter{expand};shift-down;shift-down;{action}"),
+                "",
+            ));
+            assert!(!output.contains("Could not"), "{output}");
+            assert!(output.contains("status.focus=diff\n"), "{output}");
+            let index = String::from_utf8(git_output(&directory, &["show", ":a.txt"])).unwrap();
+            let worktree = fs::read_to_string(directory.join("a.txt")).unwrap();
+            let index_version = if staged { 1 } else { 3 };
+            if !revert || staged {
+                assert!(index.contains("version 2 line 2 "), "{index}");
+                assert!(
+                    index.contains(&format!("version {index_version} line 30 ")),
+                    "{index}"
+                );
+            }
+            if revert {
+                assert!(
+                    worktree.contains(&format!("version {} line 2 ", if staged { 2 } else { 3 })),
+                    "{worktree}"
+                );
+                assert!(
+                    worktree.contains(&format!("version {} line 30 ", if staged { 1 } else { 2 })),
+                    "{worktree}"
+                );
+            } else {
+                assert_eq!(fs::read(directory.join("a.txt")).unwrap(), before_worktree);
+            }
+            assert_eq!(fs::read(directory.join("b.txt")).unwrap(), before_other);
+            assert_eq!(
+                git_output(&directory, &["show", ":b.txt"]),
+                before_other_index
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn status_chunk_mutations_use_raw_content_and_require_visible_chunks() {
+    let directory = chunk_fixture();
+    let before = fs::read(directory.join("a.txt")).unwrap();
+    let output = stdout(run_in(
+        &directory,
+        "s;enter;u",
+        "set diff-filter = sed 's/version/FILTERED/g'\n",
+    ));
+    assert!(!output.contains("Could not"), "{output}");
+    let index = String::from_utf8(git_output(&directory, &["show", ":a.txt"])).unwrap();
+    assert!(index.contains("version 3 line 2 "));
+    assert!(index.contains("version 2 line 30 "));
+    assert_eq!(fs::read(directory.join("a.txt")).unwrap(), before);
+    let output = stdout(run_in(
+        &directory,
+        "s;enter;R",
+        "set diff-filter = sed '/@@/d'\n",
+    ));
+    assert!(output.contains("Selected chunk unavailable"), "{output}");
+    assert_eq!(fs::read(directory.join("a.txt")).unwrap(), before);
+    assert_eq!(
+        git_output(&directory, &["show", ":a.txt"]),
+        index.as_bytes()
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn staged_chunk_revert_rejects_a_different_worktree_without_mutation() {
+    let directory = chunk_fixture();
+    let before = fs::read(directory.join("a.txt")).unwrap();
+    let index = git_output(&directory, &["show", ":a.txt"]);
+    let output = stdout(run_in(&directory, "s;tab;enter;shift-down;R", ""));
+    assert!(output.contains("Could not revert chunk"), "{output}");
+    assert_eq!(fs::read(directory.join("a.txt")).unwrap(), before);
+    assert_eq!(git_output(&directory, &["show", ":a.txt"]), index);
+    fs::remove_dir_all(directory).unwrap();
+}
