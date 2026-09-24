@@ -42,17 +42,6 @@ gitlsd feature/topic
 | `e` | Open the selected show or status file in the editor |
 | Enter | Open selection; expand a focused diff full screen |
 
-The focused view is indicated by a cyan border. Chunk navigation jumps to visible
-hunk headers across files without wrapping, including in fullscreen diffs. Status
-actions apply to the chunk at the top of the focused diff, or the first chunk
-below a file header. Diffs without identifiable chunks require file explorer
-focus for mutations. Renames, copies, and mode changes also require explorer
-focus. Reverting a staged chunk requires the file's worktree contents to match
-the index; otherwise Git rejects the action. Status navigation stays within the
-active staged or unstaged group. With delta, omitted or unrecognizable hunk
-headers provide no chunk targets; chunk mutations require the displayed chunk
-count to match the raw Git patch.
-
 Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads additional history batches as needed.
 
 ## Configuration
