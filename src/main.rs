@@ -24,8 +24,15 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    if cli.create_config {
-        match Config::create_default()? {
+    let created_config = if cli.create_config {
+        Some(Config::create_default()?)
+    } else if cli.create_config_delta {
+        Some(Config::create_delta()?)
+    } else {
+        None
+    };
+    if let Some(created_config) = created_config {
+        match created_config {
             CreateDefaultConfig::Created(path) => {
                 println!("Created configuration at {}", path.display());
             }

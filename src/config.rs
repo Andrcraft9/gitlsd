@@ -422,6 +422,39 @@ impl std::error::Error for ConfigError {}
 
 impl Config {
     pub fn create_default() -> Result<CreateDefaultConfig, ConfigError> {
+        Self::create(Self::default())
+    }
+
+    pub fn create_delta() -> Result<CreateDefaultConfig, ConfigError> {
+        Self::create(Self::delta())
+    }
+
+    fn delta() -> Self {
+        Self {
+            preview_command: vec![
+                "git".into(),
+                "show".into(),
+                "--stat".into(),
+                "--color=always".into(),
+            ],
+            diff_filter: Some(vec![
+                "delta".into(),
+                "--paging".into(),
+                "never".into(),
+                "--line-numbers".into(),
+                "--light".into(),
+            ]),
+            editor_command: vec![
+                "code".into(),
+                "-g".into(),
+                "--goto".into(),
+                "file:line".into(),
+            ],
+            ..Self::default()
+        }
+    }
+
+    fn create(config: Self) -> Result<CreateDefaultConfig, ConfigError> {
         let path = default_path().ok_or_else(|| {
             ConfigError::new(
                 "configuration",
@@ -447,7 +480,7 @@ impl Config {
                 ));
             }
         };
-        file.write_all(Self::default().file_contents().as_bytes())
+        file.write_all(config.file_contents().as_bytes())
             .map_err(|error| ConfigError::new(path.display().to_string(), error.to_string()))?;
         Ok(CreateDefaultConfig::Created(path))
     }
@@ -1135,6 +1168,17 @@ mod tests {
         assert_eq!(parsed.show_split_ratio, (1, 2));
         assert_eq!(parsed.status_split_ratio, (1, 2));
         assert_eq!(parsed.bindings, default.bindings);
+    }
+
+    #[test]
+    fn delta_config_file_round_trips() {
+        let delta = Config::delta();
+        let parsed = Config::parse(&delta.file_contents(), Path::new("delta.conf")).unwrap();
+
+        assert_eq!(parsed.preview_command, delta.preview_command);
+        assert_eq!(parsed.diff_filter, delta.diff_filter);
+        assert_eq!(parsed.editor_command, delta.editor_command);
+        assert_eq!(parsed.bindings, delta.bindings);
     }
 
     #[test]

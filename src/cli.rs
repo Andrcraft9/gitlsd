@@ -12,7 +12,10 @@ use clap::Parser;
 #[command(version, about)]
 pub struct Cli {
     /// Browse commits reachable from this branch.
-    #[arg(value_name = "BRANCH", conflicts_with = "create_config")]
+    #[arg(
+        value_name = "BRANCH",
+        conflicts_with_all = ["create_config", "create_config_delta"]
+    )]
     pub branch: Option<String>,
 
     /// Read configuration from this file instead of the default location.
@@ -20,8 +23,12 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     /// Create a default configuration file at the default location.
-    #[arg(long, conflicts_with = "config")]
+    #[arg(long, conflicts_with_all = ["config", "create_config_delta"])]
     pub create_config: bool,
+
+    /// Create a delta configuration file at the default location.
+    #[arg(long, conflicts_with_all = ["config", "create_config"])]
+    pub create_config_delta: bool,
 
     /// Run semicolon-separated scripted keys and print the final state.
     #[cfg(debug_assertions)]
@@ -45,5 +52,13 @@ mod tests {
     #[test]
     fn branch_conflicts_with_config_creation() {
         assert!(Cli::try_parse_from(["gitlsd", "main", "--create-config"]).is_err());
+        assert!(Cli::try_parse_from(["gitlsd", "main", "--create-config-delta"]).is_err());
+    }
+
+    #[test]
+    fn config_creation_options_conflict() {
+        assert!(
+            Cli::try_parse_from(["gitlsd", "--create-config", "--create-config-delta"]).is_err()
+        );
     }
 }
