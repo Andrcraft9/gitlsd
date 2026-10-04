@@ -2,15 +2,16 @@
 //!
 //! [`App`] owns persistent log state plus enum-scoped help, show, and status state,
 //! input modes, commands, shutdown intent, and loaded-diff file/chunk indexes and
-//! revisions that remain independent of terminal rendering. Editor actions become requests for
+//! revisions built with explicit presentation rules, independent of terminal rendering.
+//! Editor actions become requests for
 //! the active frontend so terminal lifecycle stays outside the state machine.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::{
-    Action, Config, GlobalAction, Key, NavigationAction, PreviewAction, SearchAction, ShowAction,
-    StatusAction,
+    Action, Config, DiffPresentation, GlobalAction, Key, NavigationAction, PreviewAction,
+    SearchAction, ShowAction, StatusAction,
 };
 use crate::editor::EditorRequest;
 use crate::git::{
@@ -343,12 +344,13 @@ impl ShowState {
 }
 
 impl StatusState {
-    fn from_data(data: StatusData) -> Self {
+    fn from_data(data: StatusData, presentation: &DiffPresentation) -> Self {
         let staged_selected = (!data.staged.is_empty()).then_some(0);
         let unstaged_selected = (!data.unstaged.is_empty()).then_some(0);
-        let staged_patch_index = PatchIndex::for_status_files(&data.staged_diff, &data.staged);
+        let staged_patch_index =
+            PatchIndex::for_status_files(&data.staged_diff, &data.staged, presentation);
         let unstaged_patch_index =
-            PatchIndex::for_status_files(&data.unstaged_diff, &data.unstaged);
+            PatchIndex::for_status_files(&data.unstaged_diff, &data.unstaged, presentation);
         Self {
             staged: data.staged,
             unstaged: data.unstaged,
@@ -444,6 +446,13 @@ impl StatusState {
         match self.active_group {
             StatusGroup::Staged => self.staged_diff_revision,
             StatusGroup::Unstaged => self.unstaged_diff_revision,
+        }
+    }
+
+    fn patch_index(&self) -> &PatchIndex {
+        match self.active_group {
+            StatusGroup::Staged => &self.staged_patch_index,
+            StatusGroup::Unstaged => &self.unstaged_patch_index,
         }
     }
 
@@ -623,17 +632,24 @@ impl App {
             self.status = format!("Could not open editor: {error}");
             return;
         }
-        if matches!(self.screen, Screen::Status(_)) {
-            let focus_diff = self
-                .screen
-                .status()
-                .is_some_and(|status| status.status_focus == StatusFocus::Diff);
+        if let Some(status) = self.screen.status() {
+            let offsets = (
+                status.staged_diff_offset,
+                status.unstaged_diff_offset,
+                status.staged_diff_horizontal_offset,
+                status.unstaged_diff_horizontal_offset,
+            );
             match source.load_status() {
                 Ok(data) => {
                     self.replace_status_data(data);
-                    if focus_diff {
-                        self.focus_status_diff();
-                    }
+                    let status = self.screen.status_mut().unwrap();
+                    status.staged_diff_offset =
+                        offsets.0.min(status.staged_diff.len().saturating_sub(1));
+                    status.unstaged_diff_offset =
+                        offsets.1.min(status.unstaged_diff.len().saturating_sub(1));
+                    status.staged_diff_horizontal_offset = offsets.2;
+                    status.unstaged_diff_horizontal_offset = offsets.3;
+                    self.status.clear();
                 }
                 Err(error) => {
                     self.status = format!("Could not refresh status after editor: {error}");
@@ -1032,7 +1048,14 @@ impl App {
                 show.show_files.get(selected).and_then(|file| {
                     file.worktree_path().map(|path| {
                         let line = (show.show_focus == ShowFocus::Diff)
-                            .then(|| diff_line_number(&show.show_diff_lines, show.show_diff_offset))
+                            .then(|| {
+                                diff_line_number(
+                                    &show.show_diff_lines,
+                                    show.show_diff_offset,
+                                    &show.show_patch_index,
+                                    &self.config.diff_presentation,
+                                )
+                            })
                             .flatten();
                         (path.to_path_buf(), line)
                     })
@@ -1048,7 +1071,12 @@ impl App {
                         file.worktree_path().map(|path| {
                             let line = (status.status_focus == StatusFocus::Diff)
                                 .then(|| {
-                                    diff_line_number(status.diff_lines(), status.diff_offset())
+                                    diff_line_number(
+                                        status.diff_lines(),
+                                        status.diff_offset(),
+                                        status.patch_index(),
+                                        &self.config.diff_presentation,
+                                    )
                                 })
                                 .flatten();
                             (path, line)
@@ -1499,7 +1527,8 @@ impl App {
     fn open_status(&mut self, source: &mut impl HistorySource) {
         match source.load_status() {
             Ok(data) => {
-                self.screen = Screen::Status(StatusState::from_data(data));
+                self.screen =
+                    Screen::Status(StatusState::from_data(data, &self.config.diff_presentation));
                 self.input = InputMode::Normal;
                 self.status.clear();
             }
@@ -1524,10 +1553,16 @@ impl App {
         status.unstaged = data.unstaged;
         status.staged_diff = data.staged_diff;
         status.unstaged_diff = data.unstaged_diff;
-        status.staged_patch_index =
-            PatchIndex::for_status_files(&status.staged_diff, &status.staged);
-        status.unstaged_patch_index =
-            PatchIndex::for_status_files(&status.unstaged_diff, &status.unstaged);
+        status.staged_patch_index = PatchIndex::for_status_files(
+            &status.staged_diff,
+            &status.staged,
+            &self.config.diff_presentation,
+        );
+        status.unstaged_patch_index = PatchIndex::for_status_files(
+            &status.unstaged_diff,
+            &status.unstaged,
+            &self.config.diff_presentation,
+        );
         status.staged_diff_revision = next_document_revision();
         status.unstaged_diff_revision = next_document_revision();
         status.staged_selected =
@@ -1839,7 +1874,11 @@ impl App {
 
         match source.load_show(&id) {
             Ok(data) => {
-                let patch_index = PatchIndex::for_changed_files(&data.diff, &data.files);
+                let patch_index = PatchIndex::for_changed_files(
+                    &data.diff,
+                    &data.files,
+                    &self.config.diff_presentation,
+                );
                 self.screen = Screen::Show(ShowState {
                     show_metadata: data.metadata,
                     show_selected: (!data.files.is_empty()).then_some(0),
@@ -3579,7 +3618,11 @@ mod tests {
         app.screen = Screen::Show(ShowState {
             show_files: vec![file.clone()],
             show_diff_lines: diff.clone(),
-            show_patch_index: PatchIndex::for_changed_files(&diff, &[file]),
+            show_patch_index: PatchIndex::for_changed_files(
+                &diff,
+                &[file],
+                &DiffPresentation::default(),
+            ),
             show_selected: Some(0),
             ..ShowState::default()
         });
@@ -3596,15 +3639,18 @@ mod tests {
         assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:21");
         app.take_editor_request();
 
-        app.screen = Screen::Status(StatusState::from_data(StatusData {
-            unstaged: vec![StatusFile {
-                display: " M src/lib.rs".into(),
-                old_path: Some(b"src/lib.rs".to_vec()),
-                new_path: Some(b"src/lib.rs".to_vec()),
-            }],
-            unstaged_diff: diff,
-            ..StatusData::default()
-        }));
+        app.screen = Screen::Status(StatusState::from_data(
+            StatusData {
+                unstaged: vec![StatusFile {
+                    display: " M src/lib.rs".into(),
+                    old_path: Some(b"src/lib.rs".to_vec()),
+                    new_path: Some(b"src/lib.rs".to_vec()),
+                }],
+                unstaged_diff: diff,
+                ..StatusData::default()
+            },
+            &DiffPresentation::default(),
+        ));
         app.screen.status_mut().unwrap().active_group = StatusGroup::Unstaged;
         app.dispatch(Action::Global(GlobalAction::OpenEditor), &mut history);
         assert_editor_request(app.editor_request().unwrap(), "src/lib.rs:1");
@@ -3640,6 +3686,110 @@ mod tests {
     }
 
     #[test]
+    fn editor_return_preserves_show_view() {
+        let mut app = App::new(Config::default());
+        let mut history = ShowHistory {
+            records: records(1),
+            result: Ok(show_data()),
+        };
+        app.initialize(&mut history).unwrap();
+        app.handle_key(Key::Char('d'), &mut history);
+        app.handle_key(Key::Down, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Enter, &mut history);
+        app.handle_key(Key::Right, &mut history);
+        app.screen.show_mut().unwrap().last_show_search = Some("needle".into());
+        let previous = app.screen.clone();
+        app.finish_editor(Ok(()), &mut history);
+        assert_eq!(app.screen, previous);
+        app.finish_editor(Err("planned failure".into()), &mut history);
+        assert_eq!(app.screen, previous);
+        assert!(
+            app.status
+                .contains("Could not open editor: planned failure")
+        );
+    }
+
+    #[test]
+    fn editor_return_preserves_both_status_groups_and_clamps_shorter_diffs() {
+        struct StatusHistory(StatusData);
+        impl HistorySource for StatusHistory {
+            fn load(&mut self, _: usize, _: usize) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                Ok(self.0.clone())
+            }
+        }
+        let files = ["one.rs", "two.rs"]
+            .map(|path| StatusFile {
+                display: format!("M  {path}"),
+                old_path: Some(path.as_bytes().to_vec()),
+                new_path: Some(path.as_bytes().to_vec()),
+            })
+            .to_vec();
+        let diff = [
+            "diff --git a/one.rs b/one.rs",
+            "@@ -1 +1 @@",
+            "+one",
+            "diff --git a/two.rs b/two.rs",
+            "@@ -1 +1 @@",
+            "+two",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for group in [StatusGroup::Staged, StatusGroup::Unstaged] {
+            let mut history = StatusHistory(StatusData {
+                staged: files.clone(),
+                unstaged: files.clone(),
+                staged_diff: diff.clone(),
+                unstaged_diff: diff.clone(),
+            });
+            let mut app = App::new(Config::default());
+            app.screen = Screen::Status(StatusState {
+                active_group: group,
+                status_focus: StatusFocus::Diff,
+                status_diff_fullscreen: true,
+                staged_selected: Some(1),
+                unstaged_selected: Some(1),
+                staged_explorer_offset: 1,
+                unstaged_explorer_offset: 1,
+                staged_diff_offset: 4,
+                unstaged_diff_offset: 5,
+                staged_diff_horizontal_offset: 20,
+                unstaged_diff_horizontal_offset: 40,
+                explorer_horizontal_offset: 10,
+                last_search: Some("two".into()),
+                ..StatusState::from_data(history.0.clone(), &DiffPresentation::default())
+            });
+            let mut previous = app.screen.clone();
+            app.finish_editor(Ok(()), &mut history);
+            // Reloaded documents get new revisions; all view state remains intact.
+            let refreshed = app.screen.status().unwrap();
+            let expected = previous.status_mut().unwrap();
+            assert_ne!(
+                expected.staged_diff_revision,
+                refreshed.staged_diff_revision
+            );
+            assert_ne!(
+                expected.unstaged_diff_revision,
+                refreshed.unstaged_diff_revision
+            );
+            expected.staged_diff_revision = refreshed.staged_diff_revision;
+            expected.unstaged_diff_revision = refreshed.unstaged_diff_revision;
+            assert_eq!(app.screen, previous);
+            app.finish_editor(Err("planned failure".into()), &mut history);
+            assert_eq!(app.screen, previous);
+            history.0.staged_diff.truncate(2);
+            history.0.unstaged_diff.clear();
+            app.finish_editor(Ok(()), &mut history);
+            let status = app.screen.status().unwrap();
+            assert_eq!(status.staged_diff_offset, 1);
+            assert_eq!(status.unstaged_diff_offset, 0);
+        }
+    }
+
+    #[test]
     fn successful_editor_return_refreshes_status_data() {
         struct RefreshHistory;
 
@@ -3670,15 +3820,18 @@ mod tests {
         }
 
         let mut app = App::new(Config::default());
-        app.screen = Screen::Status(StatusState::from_data(StatusData {
-            unstaged: vec![StatusFile {
-                display: " M stale.rs".into(),
-                old_path: Some(b"stale.rs".to_vec()),
-                new_path: Some(b"stale.rs".to_vec()),
-            }],
-            unstaged_diff: vec!["stale".into()],
-            ..StatusData::default()
-        }));
+        app.screen = Screen::Status(StatusState::from_data(
+            StatusData {
+                unstaged: vec![StatusFile {
+                    display: " M stale.rs".into(),
+                    old_path: Some(b"stale.rs".to_vec()),
+                    new_path: Some(b"stale.rs".to_vec()),
+                }],
+                unstaged_diff: vec!["stale".into()],
+                ..StatusData::default()
+            },
+            &DiffPresentation::default(),
+        ));
         app.finish_editor(Ok(()), &mut RefreshHistory);
 
         let status = app.screen.status().unwrap();
@@ -3720,14 +3873,17 @@ mod tests {
         app.dispatch(Action::Status(StatusAction::Open), &mut history);
         assert_eq!(app.screen, Screen::Log);
         assert!(app.status.contains("planned refresh failure"));
-        app.screen = Screen::Status(StatusState::from_data(StatusData {
-            unstaged: vec![StatusFile {
-                display: " M stale.txt".into(),
-                old_path: Some(b"stale.txt".to_vec()),
-                new_path: Some(b"stale.txt".to_vec()),
-            }],
-            ..StatusData::default()
-        }));
+        app.screen = Screen::Status(StatusState::from_data(
+            StatusData {
+                unstaged: vec![StatusFile {
+                    display: " M stale.txt".into(),
+                    old_path: Some(b"stale.txt".to_vec()),
+                    new_path: Some(b"stale.txt".to_vec()),
+                }],
+                ..StatusData::default()
+            },
+            &DiffPresentation::default(),
+        ));
 
         app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
 
@@ -3771,14 +3927,17 @@ mod tests {
         let mut app = App::new(Config::default());
         let mut history = StatusSelectionChanged { mutations: 0 };
         app.initialize(&mut history).unwrap();
-        app.screen = Screen::Status(StatusState::from_data(StatusData {
-            unstaged: vec![StatusFile {
-                display: " M selected.txt".into(),
-                old_path: Some(b"selected.txt".to_vec()),
-                new_path: Some(b"selected.txt".to_vec()),
-            }],
-            ..StatusData::default()
-        }));
+        app.screen = Screen::Status(StatusState::from_data(
+            StatusData {
+                unstaged: vec![StatusFile {
+                    display: " M selected.txt".into(),
+                    old_path: Some(b"selected.txt".to_vec()),
+                    new_path: Some(b"selected.txt".to_vec()),
+                }],
+                ..StatusData::default()
+            },
+            &DiffPresentation::default(),
+        ));
 
         app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
 

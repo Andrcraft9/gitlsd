@@ -1,8 +1,8 @@
 //! Runtime policy and frontend-independent input vocabulary.
 //!
 //! This module owns defaults, configuration discovery, creation and parsing, effective
-//! settings, and the mapping from physical [`Key`] values to domain-grouped
-//! application [`Action`] values. The grouped runtime vocabulary retains the
+//! settings (including typed diff presentation recognition), and the mapping from
+//! physical [`Key`] values to domain-grouped application [`Action`] values. The grouped runtime vocabulary retains the
 //! same user-facing action names for configuration and effective help.
 
 use std::collections::BTreeMap;
@@ -275,6 +275,43 @@ impl FromStr for Key {
     }
 }
 
+/// Explicit recognition rules for unified diff presentation. Missing labels disable
+/// a rule; empty labels enable unlabeled headers. Raw Git syntax is always supported.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DiffPresentation {
+    pub file_added_label: Option<String>,
+    pub file_modified_label: Option<String>,
+    pub file_removed_label: Option<String>,
+    pub file_renamed_label: Option<String>,
+    pub file_copied_label: Option<String>,
+    pub hunk_label: Option<String>,
+    pub decoration_chars: String,
+    pub line_separators: Option<[String; 2]>,
+}
+
+impl DiffPresentation {
+    fn settings(&self) -> Vec<(&'static str, Vec<String>)> {
+        let mut settings = Vec::new();
+        for (name, label) in [
+            ("file-added-label", &self.file_added_label),
+            ("file-modified-label", &self.file_modified_label),
+            ("file-removed-label", &self.file_removed_label),
+            ("file-renamed-label", &self.file_renamed_label),
+            ("file-copied-label", &self.file_copied_label),
+            ("hunk-label", &self.hunk_label),
+        ] {
+            if let Some(label) = label {
+                settings.push((name, vec![label.clone()]));
+            }
+        }
+        settings.push(("decoration-chars", vec![self.decoration_chars.clone()]));
+        if let Some(separators) = &self.line_separators {
+            settings.push(("line-separators", separators.to_vec()));
+        }
+        settings
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub log_command: Vec<String>,
@@ -283,6 +320,7 @@ pub struct Config {
     pub show_command: Vec<String>,
     pub status_diff_command: Vec<String>,
     pub diff_filter: Option<Vec<String>>,
+    pub diff_presentation: DiffPresentation,
     pub editor_command: Vec<String>,
     pub batch_size: usize,
     pub log_split_ratio: (u16, u16),
@@ -380,6 +418,7 @@ impl Default for Config {
             ],
             status_diff_command: vec!["git".into(), "diff".into(), "--color=always".into()],
             diff_filter: None,
+            diff_presentation: DiffPresentation::default(),
             editor_command: vec!["micro".into(), "+line".into(), "file".into()],
             batch_size: 100,
             log_split_ratio: (1, 1),
@@ -443,7 +482,29 @@ impl Config {
                 "never".into(),
                 "--line-numbers".into(),
                 "--light".into(),
+                "--no-gitconfig".into(),
+                "--file-added-label=added:".into(),
+                "--file-modified-label=modified:".into(),
+                "--file-removed-label=removed:".into(),
+                "--file-renamed-label=renamed:".into(),
+                "--file-copied-label=copied:".into(),
+                "--right-arrow=⟶".into(),
+                "--file-decoration-style=blue ul".into(),
+                "--hunk-header-decoration-style=blue box".into(),
+                "--hunk-header-style=line-number syntax".into(),
+                "--line-numbers-left-format={nm:^4}⋮".into(),
+                "--line-numbers-right-format={np:^4}│".into(),
             ]),
+            diff_presentation: DiffPresentation {
+                file_added_label: Some("added:".into()),
+                file_modified_label: Some("modified:".into()),
+                file_removed_label: Some("removed:".into()),
+                file_renamed_label: Some("renamed:".into()),
+                file_copied_label: Some("copied:".into()),
+                hunk_label: Some(String::new()),
+                decoration_chars: "─━═│┃║┌┐└┘├┤┏┓┗┛┣┫╭╮╰╯╔╗╚╝".into(),
+                line_separators: Some(["⋮".into(), "│".into()]),
+            },
             editor_command: vec![
                 "code".into(),
                 "-g".into(),
@@ -611,6 +672,62 @@ impl Config {
                 }
                 self.diff_filter = (!values.is_empty()).then(|| values.to_vec());
             }
+            name if name.starts_with("diff-filter-") => {
+                if values
+                    .iter()
+                    .any(|value| value.chars().any(char::is_control))
+                {
+                    return Err(ConfigError::new(
+                        location,
+                        "diff recognition settings cannot contain control characters",
+                    ));
+                }
+                let name = &name["diff-filter-".len()..];
+                if name == "line-separators" {
+                    if values.len() != 2
+                        || values.iter().any(String::is_empty)
+                        || values[0] == values[1]
+                    {
+                        return Err(ConfigError::new(
+                            location,
+                            "line-separators requires two nonempty, distinct strings",
+                        ));
+                    }
+                    self.diff_presentation.line_separators =
+                        Some([values[0].clone(), values[1].clone()]);
+                } else {
+                    if values.len() != 1 {
+                        return Err(ConfigError::new(
+                            location,
+                            "diff recognition setting requires one string (which may be empty)",
+                        ));
+                    }
+                    let value = values[0].clone();
+                    match name {
+                        "file-added-label" => self.diff_presentation.file_added_label = Some(value),
+                        "file-modified-label" => {
+                            self.diff_presentation.file_modified_label = Some(value)
+                        }
+                        "file-removed-label" => {
+                            self.diff_presentation.file_removed_label = Some(value)
+                        }
+                        "file-renamed-label" => {
+                            self.diff_presentation.file_renamed_label = Some(value)
+                        }
+                        "file-copied-label" => {
+                            self.diff_presentation.file_copied_label = Some(value)
+                        }
+                        "hunk-label" => self.diff_presentation.hunk_label = Some(value),
+                        "decoration-chars" => self.diff_presentation.decoration_chars = value,
+                        _ => {
+                            return Err(ConfigError::new(
+                                location,
+                                format!("unknown setting `diff-filter-{name}`"),
+                            ));
+                        }
+                    }
+                }
+            }
             "editor" => {
                 if values.first().is_none_or(String::is_empty)
                     || values.iter().any(|value| value.contains('\0'))
@@ -752,6 +869,12 @@ impl Config {
                     .map_or_else(|| "defaults".into(), |path| path.display().to_string())
             ),
         ];
+        for (name, values) in self.diff_presentation.settings() {
+            lines.push(format!(
+                "setting.diff-filter-{name}={}",
+                format_arguments(&values)
+            ));
+        }
         lines.extend(
             self.bindings
                 .iter()
@@ -792,6 +915,12 @@ impl Config {
             ),
             format!("set editor = {}", format_arguments(&self.editor_command)),
         ];
+        for (name, values) in self.diff_presentation.settings() {
+            lines.push(format!(
+                "set diff-filter-{name} = {}",
+                format_arguments(&values)
+            ));
+        }
         lines.extend(
             self.bindings
                 .iter()
@@ -1025,6 +1154,65 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn presentation_settings_preserve_empty_labels_unicode_and_delimiters() {
+        let config = Config::parse(
+            "set diff-filter-file-modified-label = \"\"\nset diff-filter-file-added-label = \"新增：\"\nset diff-filter-hunk-label = \"区块 \"\nset diff-filter-decoration-chars = \"◆┃\"\nset diff-filter-line-separators = \" :: \" \" → \"\n",
+            Path::new("presentation.conf"),
+        ).unwrap();
+        assert_eq!(
+            config.diff_presentation.file_modified_label.as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            config.diff_presentation.file_added_label.as_deref(),
+            Some("新增：")
+        );
+        assert!(config.diff_presentation.file_removed_label.is_none());
+        let parsed = Config::parse(&config.file_contents(), Path::new("roundtrip.conf")).unwrap();
+        assert_eq!(parsed.diff_presentation, config.diff_presentation);
+        assert!(
+            config
+                .help_lines()
+                .contains(&"setting.diff-filter-file-modified-label=\"\"".into())
+        );
+        assert_eq!(
+            Config::default().diff_presentation,
+            DiffPresentation::default()
+        );
+    }
+
+    #[test]
+    fn malformed_presentation_settings_are_rejected() {
+        for setting in [
+            "file-added-label",
+            "file-modified-label a b",
+            "file-removed-label a b",
+            "file-renamed-label",
+            "file-copied-label",
+            "hunk-label",
+            "decoration-chars a b",
+            "line-separators",
+            "line-separators a",
+            "line-separators a b c",
+            "line-separators \"\" b",
+            "line-separators a a",
+            "hunk-label \"a\tb\"",
+            "decoration-chars \"a\x1bb\"",
+            "file-added-label \"a\rb\"",
+            "unknown x",
+        ] {
+            assert!(
+                Config::parse(
+                    &format!("set diff-filter-{setting}\n"),
+                    Path::new("bad.conf")
+                )
+                .is_err(),
+                "{setting}"
+            );
+        }
+    }
+
+    #[test]
     fn chunk_defaults_and_explicit_file_overrides() {
         let default = Config::default();
         for (key, action) in [
@@ -1177,6 +1365,7 @@ mod tests {
 
         assert_eq!(parsed.preview_command, delta.preview_command);
         assert_eq!(parsed.diff_filter, delta.diff_filter);
+        assert_eq!(parsed.diff_presentation, delta.diff_presentation);
         assert_eq!(parsed.editor_command, delta.editor_command);
         assert_eq!(parsed.bindings, delta.bindings);
     }

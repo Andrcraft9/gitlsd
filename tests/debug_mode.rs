@@ -726,8 +726,20 @@ fn creates_delta_config_once() {
     let contents = fs::read_to_string(&path).unwrap();
     assert!(contents.contains("set preview = \"git\" \"show\" \"--stat\" \"--color=always\"\n"));
     assert!(contents.contains(
-        "set diff-filter = \"delta\" \"--paging\" \"never\" \"--line-numbers\" \"--light\"\n"
+        "set diff-filter = \"delta\" \"--paging\" \"never\" \"--line-numbers\" \"--light\""
     ));
+    for (kind, label) in [
+        ("added", "added:"),
+        ("modified", "modified:"),
+        ("removed", "removed:"),
+        ("renamed", "renamed:"),
+        ("copied", "copied:"),
+    ] {
+        assert!(contents.contains(&format!("\"--file-{kind}-label={label}\"")));
+        assert!(contents.contains(&format!(
+            "set diff-filter-file-{kind}-label = \"{label}\"\n"
+        )));
+    }
     assert!(contents.contains("set editor = \"code\" \"-g\" \"--goto\" \"file:line\"\n"));
 
     let exists = command()
@@ -1339,6 +1351,95 @@ fn status_mutations_use_exact_special_paths() {
             .split(|byte| *byte == 0)
             .any(|path| path == name.as_encoded_bytes())
     );
+}
+
+#[cfg(unix)]
+fn generic_filter_config() -> &'static str {
+    r#"set diff-filter = sed -E 's/\x1b\[[0-9;]*m//g; s|^diff --git a/.* b/|\n文件: |; s|^@@ -[0-9,]+ [+]([0-9]+)(,[0-9]+)? @@.*$|\n区块: \1: code|; s/version/FILTERED/g'
+set diff-filter-file-modified-label = "文件:"
+set diff-filter-hunk-label = "区块:"
+set editor = code --goto file:line
+"#
+}
+
+#[cfg(unix)]
+#[test]
+fn generic_filtered_navigation_refresh_and_editor_use_displayed_headers() {
+    let directory = chunk_fixture();
+    let config = generic_filter_config();
+    for (open, mode) in [("d", "show"), ("s", "status"), ("s;tab", "status")] {
+        let initial = stdout(run_in(&directory, &format!("{open};enter"), config));
+        let diff = initial.split_once(&format!("{mode}.diff:\n")).unwrap().1;
+        let headers = diff
+            .lines()
+            .enumerate()
+            .filter_map(|(row, line)| line.starts_with("  区块:").then_some(row))
+            .collect::<Vec<_>>();
+        assert_eq!(headers.len(), 4, "{initial}");
+        for (keys, header, selected) in [
+            ("shift-down", 0, 0),
+            ("shift-down;shift-down", 1, 0),
+            ("shift-down;shift-down;shift-down", 2, 1),
+            ("shift-down;shift-down;shift-up", 0, 0),
+        ] {
+            let output = stdout(run_in(
+                &directory,
+                &format!("{open};enter;{keys};e"),
+                config,
+            ));
+            assert_eq!(snapshot_offset(&output, mode), headers[header]);
+            assert!(
+                output.contains(&format!("{mode}.selected={selected}\n")),
+                "{output}"
+            );
+            let file = if selected == 0 { "a.txt" } else { "b.txt" };
+            let number = if header == 1 { 27 } else { 1 };
+            assert!(output.contains(&format!("{file}:{number}\"]")), "{output}");
+        }
+        let refreshed = stdout(run_in(
+            &directory,
+            &format!("{open};r;enter;shift-down"),
+            config,
+        ));
+        assert_eq!(snapshot_offset(&refreshed, mode), headers[0]);
+    }
+    let unavailable = stdout(run_in(
+        &directory,
+        "d;enter;shift-down",
+        &config.replace("s/version/FILTERED/g", "s/version/FILTERED/g; /区块:/d"),
+    ));
+    assert_eq!(snapshot_offset(&unavailable, "show"), 1);
+    assert!(!unavailable.contains("区块:"), "{unavailable}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn generic_filtered_chunk_mutations_rebuild_both_status_groups() {
+    for staged in [false, true] {
+        let directory = chunk_fixture();
+        let group = if staged { ";tab" } else { "" };
+        let output = stdout(run_in(
+            &directory,
+            &format!("s{group};enter;shift-down;u;shift-down;e"),
+            generic_filter_config(),
+        ));
+        assert!(!output.contains("Could not"), "{output}");
+        assert!(output.contains("status.focus=diff"), "{output}");
+        assert!(output.contains("a.txt:27\"]"), "{output}");
+        let index = String::from_utf8(git_output(&directory, &["show", ":a.txt"])).unwrap();
+        assert!(
+            index.contains(if staged {
+                "version 1 line 2"
+            } else {
+                "version 3 line 2"
+            }),
+            "{index}"
+        );
+        assert!(index.contains("version 2 line 30"), "{index}");
+        assert!(!index.contains("FILTERED"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 // Two separated chunks per file in each independently loaded diff document.

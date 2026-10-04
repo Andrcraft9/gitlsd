@@ -1933,7 +1933,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("help"));
-        assert!(text.contains("binding."));
+        assert!(text.contains("setting.diff-filter-decoration-chars"));
         assert!(!text.contains("setting.log"));
         assert!(text.contains("Showing effective configuration"));
     }

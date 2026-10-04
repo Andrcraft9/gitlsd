@@ -39,7 +39,7 @@ gitlsd feature/topic
 | `u` | Stage or unstage selected chunk (diff focus) or file (explorer focus) in status mode |
 | `r` | Refresh the current view (log and show reset selection and scroll position) |
 | `R` | Revert selected chunk (diff focus) or file (explorer focus) in status mode (unstaged from index, staged from HEAD; remove untracked files) |
-| `e` | Open the selected show or status file in the editor |
+| `e` | Open the selected show or status file in the editor, keeping the view position |
 | Enter | Open selection; expand a focused diff full screen |
 
 Commands: `:help` (`:h`), `:goto <commit>` (`:gt <commit>`) in log mode, and `:quit` (`:q`). `:goto` accepts a full commit ID or commit ID prefix and loads additional history batches as needed.
