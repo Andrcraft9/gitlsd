@@ -3,7 +3,8 @@
 //! [`HistorySource`] is the application-facing contract. [`GitHistory`]
 //! implements it by executing configured Git commands directly, pairing
 //! Git-rendered rows with stable commit IDs, loading cohesive show and status
-//! data, performing file and chunk status mutations, filtering diff presentation
+//! data with comparison-specific status paths, performing file and chunk status
+//! mutations, filtering diff presentation
 //! through an optional direct subprocess, and sanitizing terminal output afterward.
 //! It indexes raw Git and explicitly configured generic file and chunk headers in
 //! displayed rows. Recognition and editor line mapping share typed presentation
@@ -56,9 +57,9 @@ pub struct ShowData {
 pub struct StatusFile {
     /// Git status text sanitized for display.
     pub display: String,
-    /// The path before a rename or copy, retained as raw Git bytes.
+    /// The old-side path for this group's comparison, retained as raw Git bytes.
     pub old_path: Option<Vec<u8>>,
-    /// The path after a rename or copy, retained as raw Git bytes.
+    /// The new-side path for this group's comparison, retained as raw Git bytes.
     pub new_path: Option<Vec<u8>>,
 }
 
@@ -1228,25 +1229,36 @@ fn parse_status(output: &[u8]) -> Result<(Vec<StatusFile>, Vec<StatusFile>), Git
             };
             // Porcelain v1 -z emits the destination first and the source
             // second. Keep both raw values for exact mutations.
-            (Some(second_path.to_vec()), Some(first_path))
+            (Some(second_path.to_vec()), Some(first_path.clone()))
         } else if index_status == 'D' || worktree_status == 'D' {
-            (Some(first_path), None)
+            (Some(first_path.clone()), None)
         } else if index_status == 'A' || worktree_status == '?' {
-            (None, Some(first_path))
+            (None, Some(first_path.clone()))
         } else {
-            (Some(first_path.clone()), Some(first_path))
+            (Some(first_path.clone()), Some(first_path.clone()))
         };
         let display = status_display(index_status, worktree_status, &old_path, &new_path);
-        let file = StatusFile {
-            display,
-            old_path,
-            new_path,
+        // Each group describes a different comparison. For example, AM is an
+        // addition against HEAD but a modification against the index; RM uses
+        // the rename destination on both sides of the unstaged comparison.
+        let file_for = |change| {
+            let (old_path, new_path) = match change {
+                'R' | 'C' => (old_path.clone(), new_path.clone()),
+                'A' | '?' => (None, Some(first_path.clone())),
+                'D' => (Some(first_path.clone()), None),
+                _ => (Some(first_path.clone()), Some(first_path.clone())),
+            };
+            StatusFile {
+                display: display.clone(),
+                old_path,
+                new_path,
+            }
         };
         if index_status != ' ' && index_status != '?' {
-            staged.push(file.clone());
+            staged.push(file_for(index_status));
         }
         if worktree_status != ' ' || index_status == '?' {
-            unstaged.push(file);
+            unstaged.push(file_for(worktree_status));
         }
     }
     Ok((staged, unstaged))
@@ -2623,6 +2635,72 @@ mod tests {
             unstaged[1].new_path.as_deref(),
             Some(b"literal[*].txt".as_slice())
         );
+    }
+
+    #[test]
+    fn mixed_status_changes_index_each_groups_filtered_headers() {
+        let presentation = DiffPresentation {
+            file_modified_label: Some("modified:".into()),
+            ..test_presentation()
+        };
+        for (porcelain, staged_header, unstaged_header, staged_paths, unstaged_paths) in [
+            (
+                b"AM new.txt\0".as_slice(),
+                "added: new.txt",
+                "modified: new.txt",
+                (None, Some("new.txt")),
+                (Some("new.txt"), Some("new.txt")),
+            ),
+            (
+                b"RM new.txt\0old.txt\0",
+                "renamed: old.txt -> new.txt",
+                "modified: new.txt",
+                (Some("old.txt"), Some("new.txt")),
+                (Some("new.txt"), Some("new.txt")),
+            ),
+            (
+                b"MD file.txt\0",
+                "modified: file.txt",
+                "removed: file.txt",
+                (Some("file.txt"), Some("file.txt")),
+                (Some("file.txt"), None),
+            ),
+            (
+                b"AD new.txt\0",
+                "added: new.txt",
+                "removed: new.txt",
+                (None, Some("new.txt")),
+                (Some("new.txt"), None),
+            ),
+            (
+                b"RD new.txt\0old.txt\0",
+                "renamed: old.txt -> new.txt",
+                "removed: new.txt",
+                (Some("old.txt"), Some("new.txt")),
+                (Some("new.txt"), None),
+            ),
+            (
+                b"CM new.txt\0old.txt\0",
+                "copied: old.txt -> new.txt",
+                "modified: new.txt",
+                (Some("old.txt"), Some("new.txt")),
+                (Some("new.txt"), Some("new.txt")),
+            ),
+        ] {
+            let (staged, unstaged) = parse_status(porcelain).unwrap();
+            for (files, header, (old, new)) in [
+                (staged, staged_header, staged_paths),
+                (unstaged, unstaged_header, unstaged_paths),
+            ] {
+                assert_eq!(files[0].old_path.as_deref(), old.map(str::as_bytes));
+                assert_eq!(files[0].new_path.as_deref(), new.map(str::as_bytes));
+                let lines = [header, "", "@@ -1 +1 @@", "+content"].map(str::to_owned);
+                let index = PatchIndex::for_status_files(&lines, &files, &presentation);
+                assert_eq!(index.offset_for(0), Some(0), "{header}");
+                assert_eq!(index.file_at(3), Some(0), "{header}");
+                assert_eq!(index.selected_chunk(2), Some((0, 1)), "{header}");
+            }
+        }
     }
 
     #[test]
