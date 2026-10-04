@@ -639,14 +639,32 @@ impl App {
                 status.staged_diff_horizontal_offset,
                 status.unstaged_diff_horizontal_offset,
             );
+            let starts = (
+                status
+                    .staged_selected
+                    .and_then(|file| status.staged_patch_index.offset_for(file)),
+                status
+                    .unstaged_selected
+                    .and_then(|file| status.unstaged_patch_index.offset_for(file)),
+            );
             match source.load_status() {
                 Ok(data) => {
                     self.replace_status_data(data);
                     let status = self.screen.status_mut().unwrap();
-                    status.staged_diff_offset =
-                        offsets.0.min(status.staged_diff.len().saturating_sub(1));
-                    status.unstaged_diff_offset =
-                        offsets.1.min(status.unstaged_diff.len().saturating_sub(1));
+                    status.staged_diff_offset = restored_diff_offset(
+                        &status.staged_patch_index,
+                        status.staged_selected,
+                        offsets.0,
+                        starts.0,
+                        status.staged_diff.len(),
+                    );
+                    status.unstaged_diff_offset = restored_diff_offset(
+                        &status.unstaged_patch_index,
+                        status.unstaged_selected,
+                        offsets.1,
+                        starts.1,
+                        status.unstaged_diff.len(),
+                    );
                     status.staged_diff_horizontal_offset = offsets.2;
                     status.unstaged_diff_horizontal_offset = offsets.3;
                     self.status.clear();
@@ -1591,6 +1609,10 @@ impl App {
                 StatusGroup::Staged => &status.staged_patch_index,
                 StatusGroup::Unstaged => &status.unstaged_patch_index,
             };
+            if index.file_at(status.diff_offset()) != status.selected() {
+                self.status = "Selected chunk unavailable".into();
+                return;
+            }
             let Some(chunk) = index.selected_chunk(status.diff_offset()) else {
                 self.status = "Selected chunk unavailable".into();
                 return;
@@ -2129,6 +2151,23 @@ fn matches_record(record: &CommitRecord, query: &str) -> bool {
     crate::git::safe_text(&record.display, false)
         .to_lowercase()
         .contains(query)
+}
+
+fn restored_diff_offset(
+    index: &PatchIndex,
+    selected: Option<usize>,
+    previous_offset: usize,
+    previous_start: Option<usize>,
+    line_count: usize,
+) -> usize {
+    selected
+        .and_then(|file| {
+            let relative = previous_start
+                .and_then(|start| previous_offset.checked_sub(start))
+                .unwrap_or(0);
+            index.offset_within_file(file, relative, line_count)
+        })
+        .unwrap_or_else(|| previous_offset.min(line_count.saturating_sub(1)))
 }
 
 fn refreshed_selection(
@@ -3786,6 +3825,142 @@ mod tests {
             let status = app.screen.status().unwrap();
             assert_eq!(status.staged_diff_offset, 1);
             assert_eq!(status.unstaged_diff_offset, 0);
+        }
+    }
+
+    #[test]
+    fn editor_return_keeps_selected_file_when_patches_move_or_shrink() {
+        struct StatusHistory {
+            data: StatusData,
+            mutations: usize,
+        }
+        impl HistorySource for StatusHistory {
+            fn load(&mut self, _: usize, _: usize) -> Result<Vec<CommitRecord>, GitError> {
+                Ok(Vec::new())
+            }
+            fn load_status(&mut self) -> Result<StatusData, GitError> {
+                Ok(self.data.clone())
+            }
+            fn mutate_chunk(
+                &mut self,
+                _: bool,
+                _: bool,
+                file: &StatusFile,
+                chunk: usize,
+                count: usize,
+            ) -> Result<(), GitError> {
+                assert_eq!(file.new_path.as_deref(), Some(b"two.rs".as_slice()));
+                assert_eq!((chunk, count), (0, 1));
+                self.mutations += 1;
+                Ok(())
+            }
+        }
+        let files = ["one.rs", "two.rs", "three.rs"]
+            .map(|path| StatusFile {
+                display: format!("MM {path}"),
+                old_path: Some(path.as_bytes().to_vec()),
+                new_path: Some(path.as_bytes().to_vec()),
+            })
+            .to_vec();
+        let diff = [
+            "diff --git a/one.rs b/one.rs",
+            "@@ -1 +1 @@",
+            "+one",
+            "diff --git a/two.rs b/two.rs",
+            "@@ -1 +1 @@",
+            "+two",
+            " context",
+            "diff --git a/three.rs b/three.rs",
+            "@@ -1 +1 @@",
+            "+three",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for group in [StatusGroup::Staged, StatusGroup::Unstaged] {
+            let mut history = StatusHistory {
+                data: StatusData {
+                    staged: files.clone(),
+                    unstaged: files.clone(),
+                    staged_diff: diff.clone(),
+                    unstaged_diff: diff.clone(),
+                },
+                mutations: 0,
+            };
+            let mut app = App::new(Config::default());
+            app.screen = Screen::Status(StatusState {
+                active_group: group,
+                status_focus: StatusFocus::Diff,
+                staged_selected: Some(1),
+                unstaged_selected: Some(1),
+                staged_diff_offset: 6,
+                unstaged_diff_offset: 6,
+                ..StatusState::from_data(history.data.clone(), &DiffPresentation::default())
+            });
+            // Growing the first patch moves the selected file down in both groups.
+            for lines in [
+                &mut history.data.staged_diff,
+                &mut history.data.unstaged_diff,
+            ] {
+                lines.splice(
+                    3..3,
+                    [" context", " context", " context", " context"].map(str::to_owned),
+                );
+            }
+            app.finish_editor(Ok(()), &mut history);
+            let status = app.screen.status().unwrap();
+            assert_eq!(
+                (status.staged_diff_offset, status.unstaged_diff_offset),
+                (10, 10)
+            );
+            assert_eq!(
+                status.staged_patch_index.file_at(status.staged_diff_offset),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .unstaged_patch_index
+                    .file_at(status.unstaged_diff_offset),
+                Some(1)
+            );
+            // Shrinking the selected patch clamps to its last row, before the next file.
+            for lines in [
+                &mut history.data.staged_diff,
+                &mut history.data.unstaged_diff,
+            ] {
+                lines.drain(9..11);
+            }
+            app.finish_editor(Ok(()), &mut history);
+            let status = app.screen.status().unwrap();
+            assert_eq!(
+                (status.staged_diff_offset, status.unstaged_diff_offset),
+                (8, 8)
+            );
+            assert_eq!(status.staged_selected, Some(1));
+            assert_eq!(status.unstaged_selected, Some(1));
+            assert_eq!(
+                status.staged_patch_index.file_at(status.staged_diff_offset),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .unstaged_patch_index
+                    .file_at(status.unstaged_diff_offset),
+                Some(1)
+            );
+            app.dispatch(Action::Status(StatusAction::ToggleStage), &mut history);
+            assert_eq!(history.mutations, 1);
+            // If the selected header disappears, never mutate the patch at a
+            // fallback absolute offset belonging to a different file.
+            for lines in [
+                &mut history.data.staged_diff,
+                &mut history.data.unstaged_diff,
+            ] {
+                lines.drain(7..9);
+            }
+            app.finish_editor(Ok(()), &mut history);
+            app.dispatch(Action::Status(StatusAction::Revert), &mut history);
+            assert_eq!(history.mutations, 1);
+            assert_eq!(app.status, "Selected chunk unavailable");
         }
     }
 

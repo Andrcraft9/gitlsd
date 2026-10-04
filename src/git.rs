@@ -138,6 +138,26 @@ impl PatchIndex {
         self.file_to_line.get(file_index).copied().flatten()
     }
 
+    /// Restore a relative row while keeping it within the selected file's patch.
+    pub fn offset_within_file(
+        &self,
+        file_index: usize,
+        relative_offset: usize,
+        line_count: usize,
+    ) -> Option<usize> {
+        let start = self.offset_for(file_index)?;
+        let end = self
+            .patch_starts
+            .iter()
+            .find_map(|(row, _)| (*row > start).then_some(*row))
+            .unwrap_or(line_count);
+        Some(
+            start
+                .saturating_add(relative_offset)
+                .min(end.saturating_sub(1)),
+        )
+    }
+
     pub fn file_at(&self, offset: usize) -> Option<usize> {
         let end = self
             .patch_starts
